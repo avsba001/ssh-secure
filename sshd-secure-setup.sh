@@ -51,9 +51,26 @@ GSSAPI=${GSSAPI:-no}
 read -rp "是否启用 X11Forwarding？[no]: " X11
 X11=${X11:-no}
 
-# ===== TCP 转发 =====
-read -rp "是否允许 TCP 转发？[no]: " TCP_FORWARD
-TCP_FORWARD=${TCP_FORWARD:-no}
+# ===== SSH 转发 / 网关 =====
+echo
+read -rp "是否启用 SSH 转发 / 网关功能（-L/-D/-R）？[no]: " ENABLE_FORWARD
+ENABLE_FORWARD=${ENABLE_FORWARD:-no}
+
+if [[ "$ENABLE_FORWARD" == "yes" ]]; then
+  ALLOW_TCP_FORWARD="yes"
+
+  read -rp "是否允许远程端口转发（-R / GatewayPorts）？[no]: " ENABLE_GATEWAY
+  ENABLE_GATEWAY=${ENABLE_GATEWAY:-no}
+
+  if [[ "$ENABLE_GATEWAY" == "yes" ]]; then
+    GATEWAY_PORTS="clientspecified"
+  else
+    GATEWAY_PORTS="no"
+  fi
+else
+  ALLOW_TCP_FORWARD="no"
+  GATEWAY_PORTS="no"
+fi
 
 # ===== 压缩 =====
 read -rp "是否启用 SSH 压缩？[no]: " COMPRESS
@@ -95,10 +112,10 @@ ClientAliveInterval $( [[ $KEEPALIVE == yes ]] && echo 300 || echo 0 )
 ClientAliveCountMax 2
 
 AllowAgentForwarding no
-AllowTcpForwarding $TCP_FORWARD
+AllowTcpForwarding $ALLOW_TCP_FORWARD
+GatewayPorts $GATEWAY_PORTS
 X11Forwarding $X11
 PermitTunnel no
-GatewayPorts no
 
 Compression $COMPRESS
 
@@ -143,6 +160,7 @@ echo
 echo "✅ SSHD 配置完成"
 echo "端口: $SSH_PORT"
 echo "Root 登录: $PERMIT_ROOT"
-echo "普通用户密码登录: $USER_PASS"
+echo "SSH 转发: $ALLOW_TCP_FORWARD"
+echo "GatewayPorts: $GATEWAY_PORTS"
 echo
 echo "⚠️ 请新开终端测试后再断开当前连接"
