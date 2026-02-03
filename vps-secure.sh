@@ -56,4 +56,4 @@ while true; do
       exit 0
       ;;
     *)
-      echo "[WARN] 无效选择，请重新输入
+      echo "[WARN] 无效选择，请重新输入"
