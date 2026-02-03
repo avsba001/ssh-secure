@@ -48,9 +48,12 @@ run_script() {
   echo ">>> $script 执行完成"
 }
 
+VERSION="1.0.2"
+
 while true; do
   echo
   echo "=============================="
+  echo "版本: $VERSION"
   echo " SSH Secure Toolkit"
   echo "=============================="
   echo "1) SSH 安全配置"
