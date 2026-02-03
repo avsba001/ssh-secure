@@ -2,7 +2,7 @@
 # ssh-安全配置
 复制到vps一键运行
 ```
-wget -O ssh-secure.sh "https://raw.githubusercontent.com/avsba001/ssh-secure/main/ssh-secure.sh" \
+wget -O ssh-secure.sh "https://raw.githubusercontent.com/avsba001/ssh-secure/main/vps-secure.sh" \
 && chmod +x ssh-secure.sh \
 && ./ssh-secure.sh
 
