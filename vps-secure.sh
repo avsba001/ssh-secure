@@ -1,9 +1,34 @@
 #!/bin/bash
 set -e
 
-REPO_RAW="https://raw.githubusercontent.com/avsba001/ssh-secure/main"
-WORKDIR="/tmp/ssh-secure"
+### ===== 基本信息 =====
+SCRIPT_NAME="vps-secure.sh"
+REPO_RAW="https://raw.githubusercontent.com/avsba001/vps-secure/main"
+LOCAL_VERSION="1.0.2"
 
+### ===== 防止无限自更新 =====
+if [ "$VPS_SECURE_UPDATED" != "1" ]; then
+  export VPS_SECURE_UPDATED=1
+
+  REMOTE_VERSION="$(wget -qO- "$REPO_RAW/VERSION" || true)"
+
+  if [ -n "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "$LOCAL_VERSION" ]; then
+    echo "发现新版本：$REMOTE_VERSION（当前 $LOCAL_VERSION）"
+    echo "正在更新脚本..."
+
+    wget -q -O "/tmp/$SCRIPT_NAME" "$REPO_RAW/$SCRIPT_NAME" || {
+      echo "更新失败，继续使用当前版本"
+    }
+
+    chmod +x "/tmp/$SCRIPT_NAME"
+    echo "更新完成，重新执行新版本"
+    exec "/tmp/$SCRIPT_NAME" "$@"
+  fi
+fi
+
+### ===== 正常逻辑从这里开始 =====
+
+WORKDIR="/tmp/ssh-secure"
 mkdir -p "$WORKDIR"
 
 if [ "$EUID" -ne 0 ]; then
