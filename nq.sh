@@ -1,16 +1,15 @@
 #!/bin/bash
-
-# ===== GitHub Proxy =====
-GH_PROXY="https://gh-proxy.com/"
+set -e
 
 current_time="$(date +%Y_%m_%d_%H_%M_%S)"
 work_dir=".nodequality$current_time"
 
-bench_os_url="${GH_PROXY}https://github.com/LloydAsp/NodeQuality/releases/download/v0.0.1/BenchOs.tar.gz"
-raw_file_prefix="${GH_PROXY}https://raw.githubusercontent.com/LloydAsp/NodeQuality/refs/heads/main"
+# ===== fastgit URLs =====
+bench_os_url="https://hub.fastgit.xyz/LloydAsp/NodeQuality/releases/download/v0.0.1/BenchOs.tar.gz"
+raw_file_prefix="https://raw.fastgit.xyz/LloydAsp/NodeQuality/refs/heads/main"
 
 if uname -m | grep -Eq 'arm|aarch64'; then
-    bench_os_url="${GH_PROXY}https://github.com/LloydAsp/NodeQuality/releases/download/v0.0.1/BenchOs-arm.tar.gz"
+    bench_os_url="https://hub.fastgit.xyz/LloydAsp/NodeQuality/releases/download/v0.0.1/BenchOs-arm.tar.gz"
 fi
 
 header_info_filename=header_info.log
@@ -22,7 +21,6 @@ net_quality_filename=net_quality.log
 net_quality_json_filename=net_quality.json
 backroute_trace_filename=backroute_trace.log
 backroute_trace_json_filename=backroute_trace.json
-port_filename=port.log
 
 function start_ascii(){
     echo -ne "\e[1;36m"
@@ -35,11 +33,7 @@ function start_ascii(){
 ██║ ╚████║╚██████╔╝██████╔╝███████╗╚██████╔╝╚██████╔╝██║  ██║███████╗██║   ██║      ██║
 ╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚══════╝ ╚══▀▀═╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝   ╚═╝      ╚═╝
 
-Benchmark script for server, collects basic hardware information, IP quality and network quality
-
-Author: Lloyd@nodeseek.com
-Github: github.com/LloydAsp/NodeQuality
-Command: bash <(curl -sL https://run.NodeQuality.com)
+NodeQuality Benchmark (fastgit version)
 
 EOF
     echo -ne "\033[0m"
@@ -50,15 +44,15 @@ function _red(){ echo -e "\033[0;31m$1\033[0m"; }
 
 function pre_init(){
     mkdir -p "$work_dir"
-    cd "$work_dir" || exit 1
+    cd "$work_dir"
     work_dir="$(pwd)"
 }
 
 function clear_mount(){
-    swapoff "$work_dir/swap" 2>/dev/null
-    umount "$work_dir/BenchOs/proc/" 2>/dev/null
-    umount "$work_dir/BenchOs/sys/" 2>/dev/null
-    umount -R "$work_dir/BenchOs/dev/" 2>/dev/null
+    swapoff "$work_dir/swap" 2>/dev/null || true
+    umount "$work_dir/BenchOs/proc/" 2>/dev/null || true
+    umount "$work_dir/BenchOs/sys/" 2>/dev/null || true
+    umount -R "$work_dir/BenchOs/dev/" 2>/dev/null || true
 }
 
 function pre_cleanup(){
@@ -67,9 +61,25 @@ function pre_cleanup(){
 }
 
 function load_bench_os(){
-    cd "$work_dir" || exit 1
-    rm -rf BenchOs
-    curl -L# -o BenchOs.tar.gz "$bench_os_url"
+    cd "$work_dir"
+    rm -rf BenchOs BenchOs.tar.gz
+
+    echo "[+] Downloading BenchOs:"
+    echo "    $bench_os_url"
+
+    if ! curl -fL --retry 3 --connect-timeout 15 \
+        -o BenchOs.tar.gz "$bench_os_url"; then
+        _red "BenchOs download failed"
+        exit 1
+    fi
+
+    # 防止 fastgit / 代理返回 HTML
+    if ! file BenchOs.tar.gz | grep -qi gzip; then
+        _red "BenchOs.tar.gz is NOT gzip (proxy returned HTML)"
+        head -n 5 BenchOs.tar.gz
+        exit 1
+    fi
+
     tar -xzf BenchOs.tar.gz
     cd BenchOs || exit 1
 
@@ -90,7 +100,8 @@ function load_part(){
 }
 
 function load_3rd_program(){
-    chroot_run wget "${GH_PROXY}https://github.com/nxtrace/NTrace-core/releases/download/v1.3.7/nexttrace_linux_amd64" -qO /usr/local/bin/nexttrace
+    chroot_run wget https://hub.fastgit.xyz/nxtrace/NTrace-core/releases/download/v1.3.7/nexttrace_linux_amd64 \
+        -qO /usr/local/bin/nexttrace
     chroot_run chmod +x /usr/local/bin/nexttrace
 }
 
@@ -113,25 +124,27 @@ function run_net_quality(){
 }
 
 function run_net_trace(){
-    chroot_run bash <(curl -Ls Net.Check.Place) -R -n -S 123 -o /result/$backroute_trace_json_filename
+    chroot_run bash <(curl -Ls Net.Check.Place) -R -n -S 123 \
+        -o /result/$backroute_trace_json_filename
 }
 
 uploadAPI="https://api.nodequality.com/api/v1/record"
 function upload_result(){
     chroot_run zip -j - "/result/*" > "$work_dir/result.zip"
     base64 "$work_dir/result.zip" | curl -X POST --data-binary @- "$uploadAPI"
+    echo
 }
 
 function post_cleanup(){
     clear_mount
     rm -rf "$work_dir"
-    exit
 }
 
 function sig_cleanup(){
     trap '' INT TERM SIGHUP EXIT
     _red "Cleaning..."
     post_cleanup
+    exit
 }
 
 function main(){
@@ -143,6 +156,7 @@ function main(){
 
     _green_bold "Load BenchOS"
     load_bench_os
+
     load_part
     load_3rd_program
 
