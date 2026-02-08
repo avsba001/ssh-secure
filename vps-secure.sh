@@ -48,7 +48,7 @@ run_script() {
   echo ">>> $script 执行完成"
 }
 
-VERSION="1.0.4"
+VERSION="1.0.5"
 
 while true; do
   echo
