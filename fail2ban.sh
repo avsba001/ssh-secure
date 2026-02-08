@@ -14,15 +14,12 @@ apt install -y rsyslog ufw fail2ban ipset
 echo "===> 创建 Fail2Ban 自定义过滤器 sshd-disconnect"
 cat > /etc/fail2ban/filter.d/sshd-disconnect.conf << 'EOF'
 [Definition]
-# 日志格式为 ISO8601 时间戳，后跟 'sshd[PID]: ...'
-# 匹配常见爆破行为：
-failregex = ^.+sshd\[\d+\]:\s+Disconnected from authenticating user root <HOST> port \d+ \[preauth\]$
-            ^.+sshd\[\d+\]:\s+Received disconnect from <HOST> port \d+:11: Bye Bye \[preauth\]$
-            ^.+sshd\[\d+\]:\s+Invalid user .* from <HOST> port \d+.*$
-            ^.+sshd\[\d+\]:\s+Disconnected from invalid user .* <HOST> port \d+ \[preauth\]$
-            ^.+sshd\[\d+\]:\s+Connection closed by authenticating user root <HOST> port \d+ \[preauth\]$
+failregex =
+    ^.*sshd\[\d+\]: Invalid user .* from <HOST> port \d+.*$
+    ^.*sshd\[\d+\]: Failed password for .* from <HOST> port \d+.*$
+    ^.*sshd\[\d+\]: Disconnected from (invalid user|authenticating user) .* <HOST> port \d+.*$
+    ^.*sshd\[\d+\]: Received disconnect from <HOST> port \d+:.*$
 
-# 防止误伤已成功登录的记录
 ignoreregex = ^.+sshd\[\d+\]:\s+Accepted .+ from <HOST> port \d+ .*$
 EOF
 
