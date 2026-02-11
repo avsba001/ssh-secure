@@ -5,3 +5,9 @@
 ```
 bash <(curl -sL https://raw.githubusercontent.com/avsba001/vps-secure/refs/heads/main/vps-secure.sh)
 ```
+
+国内加速
+
+```
+bash <(curl -sL https://gh-proxy.com/https://raw.githubusercontent.com/avsba001/vps-secure/refs/heads/main/vps-secure.sh)
+```
