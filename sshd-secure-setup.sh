@@ -3,6 +3,37 @@ set -e
 
 [[ $EUID -ne 0 ]] && echo "必须使用 root 运行" && exit 1
 
+# ===== 确保 SSH Host Keys 存在 =====
+echo "检查 SSH Host Keys..."
+
+generate_key () {
+  local type=$1
+  local file=$2
+
+  if [[ ! -f "$file" ]]; then
+    echo "⚠ 缺少 $type HostKey，正在生成..."
+    ssh-keygen -t "$type" -f "$file" -N "" -q
+    chmod 600 "$file"
+    chmod 644 "${file}.pub"
+    echo "✔ 已生成 $file"
+  else
+    echo "✔ $type HostKey 已存在"
+  fi
+}
+
+generate_key ed25519 /etc/ssh/ssh_host_ed25519_key
+generate_key ecdsa   /etc/ssh/ssh_host_ecdsa_key
+generate_key rsa     /etc/ssh/ssh_host_rsa_key
+
+
+[[ $EUID -ne 0 ]] && echo "必须使用 root 运行" && exit 1
+
+SSHD_CONFIG="/etc/ssh/sshd_config"
+BACKUP="/etc/ssh/sshd_config.bak.$(date +%F_%T)"
+
+echo "====== SSHD 一键交互式安全配置 ======"
+echo
+
 SSHD_CONFIG="/etc/ssh/sshd_config"
 BACKUP="/etc/ssh/sshd_config.bak.$(date +%F_%T)"
 
