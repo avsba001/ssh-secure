@@ -4,7 +4,7 @@ set -e
 ### ===== 基本信息 =====
 SCRIPT_NAME="vps-secure.sh"
 REPO_RAW="https://raw.githubusercontent.com/avsba001/vps-secure/main"
-LOCAL_VERSION="1.0.5"
+LOCAL_VERSION="1.0.7"
 
 ### ===== 防止无限自更新 =====
 if [ "$VPS_SECURE_UPDATED" != "1" ]; then
@@ -48,7 +48,7 @@ run_script() {
   echo ">>> $script 执行完成"
 }
 
-VERSION="1.0.5"
+VERSION="1.0.7"
 
 while true; do
   echo
@@ -60,10 +60,11 @@ while true; do
   echo "2) CAKE 队列配置"
   echo "3) Fail2Ban 防爆破"
   echo "4) XanMod Cloud 精简内核安装"
-  echo "5) 全部执行"
+  echo "5) 中国 IP ICMP 屏蔽（ipset + systemd）"
+  echo "6) 全部执行"
   echo "0) 退出"
   echo
-  read -rp "请选择要执行的操作 [0-4]: " choice
+  read -rp "请选择要执行的操作 [0-6]: " choice
 
   case "$choice" in
     1)
@@ -79,10 +80,14 @@ while true; do
       run_script "xanmod.sh"
       ;;
     5)
+      run_script "cn-ipset.sh"
+      ;;
+    6)
       run_script "sshd-secure-setup.sh"
       run_script "cake.sh"
       run_script "fail2ban.sh"
       run_script "xanmod.sh"
+      run_script "cn-ipset.sh"
       ;;
     0)
       echo "退出"
