@@ -17,9 +17,13 @@ cat > /etc/fail2ban/filter.d/sshd-disconnect.conf << 'EOF'
 failregex =
     ^.*sshd\[\d+\]: Invalid user .* from <HOST> port \d+.*$
     ^.*sshd\[\d+\]: Failed password for .* from <HOST> port \d+.*$
-    ^.*sshd\[\d+\]: Disconnected from (invalid user|authenticating user) .* <HOST> port \d+.*$
+    ^.*sshd\[\d+\]: pam_unix\(sshd:auth\): authentication failure.*rhost=<HOST>.*$
+    ^.*sshd\[\d+\]: Disconnected from (invalid user|authenticating user).* <HOST> port \d+.*$
     ^.*sshd\[\d+\]: Received disconnect from <HOST> port \d+:.*$
-
+    ^.*sshd\[\d+\]: error: kex_exchange_identification: Connection closed by remote host.*$
+    ^.*sshd\[\d+\]: Unable to negotiate with <HOST> port \d+:.*$
+    ^.*sshd\[\d+\]: pam_unix\(sshd:auth\): authentication failure.*rhost=<HOST>.*$
+    
 ignoreregex = ^.+sshd\[\d+\]:\s+Accepted .+ from <HOST> port \d+ .*$
 EOF
 
