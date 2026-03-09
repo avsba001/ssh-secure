@@ -332,7 +332,7 @@ banaction = ufw-ipset-persistent
 
 [sshd]
 enabled  = true
-port     = 22222
+port     = ssh
 logpath  = /var/log/auth.log
 backend  = auto
 maxretry = 3
@@ -342,7 +342,7 @@ bantime  = 7d
 [sshd-aggressive]
 enabled  = true
 filter   = sshd-aggressive
-port     = 22222
+port     = ssh
 logpath  = /var/log/auth.log
 backend  = auto
 maxretry = 1
