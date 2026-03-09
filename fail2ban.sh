@@ -21,7 +21,6 @@ failregex =
     ^.*sshd\[\d+\]: Disconnected from (invalid user|authenticating user).* <HOST> port \d+.*$
     ^.*sshd\[\d+\]: Received disconnect from <HOST> port \d+:.*$
     ^.*sshd\[\d+\]: Unable to negotiate with <HOST> port \d+:.*$
-    ^.*sshd\[\d+\]: pam_unix\(sshd:auth\): authentication failure.*rhost=<HOST>.*$
     
 ignoreregex = ^.+sshd\[\d+\]:\s+Accepted .+ from <HOST> port \d+ .*$
 EOF
