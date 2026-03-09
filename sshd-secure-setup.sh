@@ -153,12 +153,11 @@ Compression $COMPRESS
 # ===== 加密算法 =====
 KexAlgorithms curve25519-sha256@libssh.org
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com
-MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+MACs hmac-sha2-512-etm@openssh.com
 
 HostKey /etc/ssh/ssh_host_ed25519_key
-HostKey /etc/ssh/ssh_host_ecdsa_key
 HostKeyAlgorithms ssh-ed25519
-PubkeyAcceptedAlgorithms ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256
+PubkeyAcceptedAlgorithms ssh-ed25519
 
 # ===== GSSAPI =====
 GSSAPIAuthentication $GSSAPI
