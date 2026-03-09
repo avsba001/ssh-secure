@@ -308,12 +308,12 @@ EOF3
 cat > /etc/fail2ban/filter.d/sshd-aggressive.conf << 'EOF4'
 [Definition]
 failregex =
-  ^%(__prefix_line)sshd(?:\[\d+\])?: Invalid user .* from <HOST>(?: port \d+)?(?: ssh\d+)?\s*$
-  ^%(__prefix_line)sshd(?:\[\d+\])?: Failed password for (?:invalid user )?.* from <HOST> port \d+(?: ssh\d+)?\s*$
-  ^%(__prefix_line)sshd(?:\[\d+\])?: Did not receive identification string from <HOST>\s*$
-  ^%(__prefix_line)sshd(?:\[\d+\])?: Connection closed by (?:invalid user )?.* <HOST> port \d+ \[preauth\]\s*$
-  ^%(__prefix_line)sshd(?:\[\d+\])?: kex_exchange_identification: .* <HOST> port \d+\s*$
-  ^%(__prefix_line)sshd(?:\[\d+\])?: banner exchange: Connection from <HOST> port \d+:.*\s*$
+  ^.*sshd(?:\[\d+\])?: Invalid user .* from <HOST>(?: port \d+)?(?: ssh\d+)?\s*$
+  ^.*sshd(?:\[\d+\])?: Failed password for (?:invalid user )?.* from <HOST> port \d+(?: ssh\d+)?\s*$
+  ^.*sshd(?:\[\d+\])?: Did not receive identification string from <HOST>\s*$
+  ^.*sshd(?:\[\d+\])?: Connection closed by (?:invalid user )?.* <HOST> port \d+ \[preauth\]\s*$
+  ^.*sshd(?:\[\d+\])?: kex_exchange_identification: .* <HOST> port \d+\s*$
+  ^.*sshd(?:\[\d+\])?: banner exchange: Connection from <HOST> port \d+:.*\s*$
 ignoreregex =
 EOF4
 
