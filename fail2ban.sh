@@ -131,6 +131,41 @@ verify_network_or_restore() {
   echo "✅ 网络检查通过"
 }
 
+
+ensure_generated_files() {
+  local required_files=(
+    /usr/local/bin/f2b-ipset-ensure.sh
+    /etc/systemd/system/f2b-ipset-restore.service
+    /etc/fail2ban/action.d/ufw-ipset-persistent.conf
+    /etc/fail2ban/filter.d/sshd-aggressive.conf
+  )
+
+  for f in "${required_files[@]}"; do
+    if [ ! -s "${f}" ]; then
+      echo "❌ 关键文件未成功生成: ${f}"
+      restore_from_backup
+      exit 1
+    fi
+  done
+}
+
+wait_for_fail2ban_ready() {
+  echo "===> 等待 fail2ban 启动就绪"
+  local i
+  for i in $(seq 1 15); do
+    if fail2ban-client ping >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "❌ fail2ban 未能在预期时间内启动"
+  systemctl status fail2ban --no-pager || true
+  journalctl -u fail2ban -n 50 --no-pager || true
+  restore_from_backup
+  exit 1
+}
+
 cleanup_legacy_fail2ban_configs() {
   echo "===> 清理旧版 fail2ban.sh 残留配置"
 
@@ -315,6 +350,8 @@ findtime = 10m
 bantime  = 30d
 EOF5
 
+ensure_generated_files
+
 ufw --force enable >/dev/null 2>&1 || true
 /usr/local/bin/f2b-ipset-ensure.sh init
 
@@ -325,7 +362,7 @@ systemctl enable fail2ban --now
 systemctl restart fail2ban
 
 echo "===> fail2ban-client 验证"
-fail2ban-client ping
+wait_for_fail2ban_ready
 fail2ban-client status sshd
 fail2ban-client status sshd-aggressive
 
