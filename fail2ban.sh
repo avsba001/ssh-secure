@@ -20,7 +20,6 @@ failregex =
     ^.*sshd\[\d+\]: pam_unix\(sshd:auth\): authentication failure.*rhost=<HOST>.*$
     ^.*sshd\[\d+\]: Disconnected from (invalid user|authenticating user).* <HOST> port \d+.*$
     ^.*sshd\[\d+\]: Received disconnect from <HOST> port \d+:.*$
-    ^.*sshd\[\d+\]: error: kex_exchange_identification: Connection closed by remote host.*$
     ^.*sshd\[\d+\]: Unable to negotiate with <HOST> port \d+:.*$
     ^.*sshd\[\d+\]: pam_unix\(sshd:auth\): authentication failure.*rhost=<HOST>.*$
     
