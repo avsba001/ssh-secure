@@ -336,8 +336,8 @@ port     = ssh
 logpath  = /var/log/auth.log
 backend  = auto
 maxretry = 3
-findtime = 5m
-bantime  = 7d
+findtime = 15m
+bantime  = 30d
 
 [sshd-aggressive]
 enabled  = true
@@ -346,8 +346,8 @@ port     = ssh
 logpath  = /var/log/auth.log
 backend  = auto
 maxretry = 1
-findtime = 10m
-bantime  = 30d
+findtime = 20m
+bantime  = 365d
 EOF5
 
 ensure_generated_files
