@@ -335,7 +335,7 @@ enabled  = true
 port     = ssh
 logpath  = /var/log/auth.log
 backend  = auto
-maxretry = 3
+maxretry = 2
 findtime = 15m
 bantime  = 30d
 
