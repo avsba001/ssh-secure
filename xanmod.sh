@@ -15,30 +15,30 @@ resolve_release_assets() {
   local series="$1"
   local releases_json="$2"
 
-  RELEASES_JSON="$releases_json" python3 - "$series" <<'PY'
+  python3 - "$series" <<'PY' <<< "$releases_json"
 import json
-import os
 import re
 import sys
 
 series = sys.argv[1]
-data = json.loads(os.environ["RELEASES_JSON"])
+data = json.load(sys.stdin)
 
-pattern = re.compile(rf"^{re.escape(series)}(?:\.|$)")
+# 匹配 6.12 / 6.18 等内核系列，允许出现在 tag 或 name 的任意位置
+series_pattern = re.compile(rf"(^|[^0-9]){re.escape(series)}([^0-9]|$)")
 candidates = []
 for release in data:
     tag = release.get("tag_name", "")
-    if pattern.match(tag):
-        candidates.append((tag, release))
+    name = release.get("name", "")
+    haystack = f"{tag} {name}"
+    if series_pattern.search(haystack):
+        publish_time = release.get("published_at") or release.get("created_at") or ""
+        candidates.append((publish_time, tag, release))
 
 if not candidates:
     sys.exit(2)
 
-# sort tags by numeric segments where possible, fallback to lexical
-def vkey(tag: str):
-    return [int(x) if x.isdigit() else x for x in re.split(r"([0-9]+)", tag)]
-
-latest_tag, latest_release = sorted(candidates, key=lambda x: vkey(x[0]))[-1]
+# 按发布时间选择该系列最新 Release
+_, latest_tag, latest_release = sorted(candidates, key=lambda x: x[0])[-1]
 urls = [a.get("browser_download_url", "") for a in latest_release.get("assets", [])]
 deb_urls = [u for u in urls if u.endswith(".deb")]
 
