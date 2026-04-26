@@ -46,6 +46,7 @@ asset_pattern = re.compile(
 )
 matches = []
 for release in releases:
+    release_id = release.get("id")
     tag = release.get("tag_name", "")
     publish_time = release.get("published_at") or release.get("created_at") or ""
     for asset in release.get("assets", []):
@@ -60,14 +61,18 @@ for release in releases:
         if not kver.startswith(series + "."):
             continue
         kver_key = tuple(int(x) for x in kver.split("."))
-        matches.append((kver_key, kver, publish_time, tag, url))
+        matches.append((kver_key, kver, publish_time, release_id, tag, url))
 
 if not matches:
     sys.exit(2)
 
-# 先按内核版本选最新，再以发布时间兜底，输出该版本所有 deb
-best_key, best_kver, _, _, _ = sorted(matches, key=lambda x: (x[0], x[2]))[-1]
-deb_urls = sorted({u for key, kver, _, _, u in matches if key == best_key and kver == best_kver})
+# 先按内核版本选最新，再按发布时间选最新 release，仅输出该 release 的 deb
+best_key, best_kver, _, best_release_id, _, _ = sorted(matches, key=lambda x: (x[0], x[2]))[-1]
+deb_urls = sorted({
+    u
+    for key, kver, _, release_id, _, u in matches
+    if key == best_key and kver == best_kver and release_id == best_release_id
+})
 
 if not deb_urls:
     sys.exit(3)
@@ -119,7 +124,7 @@ main() {
 
   for url in "${deb_urls[@]}"; do
     echo "下载: $url"
-    curl -fL -O "$url"
+    curl -fL --retry 5 --retry-delay 2 --retry-all-errors -O "$url"
   done
 
   echo "安装内核包..."
