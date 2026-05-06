@@ -4,7 +4,7 @@ set -e
 ### ===== 基本信息 =====
 SCRIPT_NAME="vps-secure.sh"
 REPO_RAW="https://raw.githubusercontent.com/avsba001/vps-secure/main"
-LOCAL_VERSION="1.0.12"
+LOCAL_VERSION="1.0.13"
 
 ### ===== 防止无限自更新 =====
 if [ "$VPS_SECURE_UPDATED" != "1" ]; then
@@ -128,6 +128,8 @@ restore_from_backup() {
     6)
       iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 || true
       iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 || true
+      ip6tables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 || true
+      ip6tables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 || true
       netfilter-persistent save >/dev/null 2>&1 || true
       ;;
     *)
@@ -174,7 +176,7 @@ run_step() {
   echo ">>> $script 执行完成"
 }
 
-VERSION="1.0.12"
+VERSION="1.0.13"
 
 while true; do
   echo
