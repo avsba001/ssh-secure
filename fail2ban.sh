@@ -167,8 +167,23 @@ wait_for_fail2ban_ready() {
 }
 
 cleanup_legacy_fail2ban_configs() {
-    echo "===> 清理旧版 fail2ban 残留配置"
+    echo "===> 【平滑升级核心】正在清理旧版内核 IPset 及残留配置"
 
+    # 1. 停止旧的 fail2ban，防止其在清理期间继续调用动作
+    systemctl stop fail2ban >/dev/null 2>&1 || true
+
+    # 2. 如果已安装 ufw，通过强制重载 UFW 来一键擦除旧脚本在运行时直接强插在 iptables 里的旧规则
+    # 这一步至关重要，它能安全解除 iptables 对旧 ipset 集合的引用锁定
+    if command -v ufw >/dev/null 2>&1; then
+        ufw --force reload >/dev/null 2>&1 || true
+    fi
+
+    # 3. 强行销毁内核中旧版不兼容/不再需要的 IPset 集合，防止新脚本因类型冲突崩溃
+    ipset destroy f2b-blacklist >/dev/null 2>&1 || true
+    ipset destroy f2b-blacklist24 >/dev/null 2>&1 || true
+    rm -f /etc/ipset/f2b-ipset.rules
+
+    # 4. 彻底擦除旧版零散配置文件
     local legacy_files=(
         /etc/fail2ban/filter.d/sshd-disconnect.conf
         /etc/fail2ban/filter.d/sshd-ddos.conf
@@ -187,7 +202,7 @@ cleanup_legacy_fail2ban_configs() {
     fi
 }
 
-echo "===> 安装依赖（fail2ban/ufw/ipset/rsyslog）"
+echo "===> 安装/更新依赖（fail2ban/ufw/ipset/rsyslog）"
 apt update
 apt install -y rsyslog ufw fail2ban ipset
 
@@ -200,27 +215,28 @@ cat > /usr/local/bin/f2b-ipset-ensure.sh << 'EOS'
 #!/bin/bash
 set -euo pipefail
 
-# 单 IP 追踪已被彻底取消，全部采用 hash:net 架构
+# 彻底丢弃单 IP 追踪，全面升级为高性能的 hash:net 路由网段查表架构
 IPSET_FILE="/etc/ipset/f2b-ipset.rules"
-# 常规封禁：/24 C段网段
+# 默认窄段封禁：/24 C段
 IPSET_NET24="f2b-blacklist24"
-# 晋升封禁：/16 B段网段
+# 晋升大段封禁：/16 B段
 IPSET_NET16="f2b-blacklist16"
-# 计数缓存目录
+# 攻击密度计数缓存目录
 COUNTER_DIR="/etc/ipset/f2b-counters"
 
 ensure_sets() {
+    # 纠正为通用的 hash:net 结构类型
     ipset create "${IPSET_NET24}" hash:net family inet timeout 0 -exist
     ipset create "${IPSET_NET16}" hash:net family inet timeout 0 -exist
 }
 
 ensure_ufw_rules() {
     local chain="ufw-before-input"
-    # /16 优先级最高，挂载在最顶部
+    # /16 大网段阻断拥有最高优先级，挂载在最顶部
     iptables -C "${chain}" -m set --match-set "${IPSET_NET16}" src -j DROP >/dev/null 2>&1 || \
     iptables -I "${chain}" 1 -m set --match-set "${IPSET_NET16}" src -j DROP
 
-    # /24 紧随其后
+    # /24 窄网段紧随其后
     iptables -C "${chain}" -m set --match-set "${IPSET_NET24}" src -j DROP >/dev/null 2>&1 || \
     iptables -I "${chain}" 2 -m set --match-set "${IPSET_NET24}" src -j DROP
 }
@@ -252,7 +268,7 @@ add_ip() {
     local safe_slash16="${slash16/\//_}"
     local counter_file="${COUNTER_DIR}/${safe_slash16}"
 
-    # 记录当前恶意 IP，去重写入以精准统计该 /16 内不同的恶意触发源
+    # 将新触发的 IP 写入计数缓存（去重统计，确保统计的是同个B段下有多少个不同的恶意源）
     if [ -f "${counter_file}" ]; then
         if ! grep -q "^${ip}$" "${counter_file}"; then
             echo "${ip}" >> "${counter_file}"
@@ -264,19 +280,19 @@ add_ip() {
     local hits
     hits=$(wc -l < "${counter_file}")
 
-    # 💡 核心阈值判断：如果同个 /16 网段触发次数大于等于 5 次
-    if [ "${hits}" -ge 5 ]; then
-        # 1. 晋升：封禁整个 /16 网段
+    # 判断是否满足升级至 /16 的条件（同个B段有 3 个及以上不同的恶意IP在活跃）
+    if [ "${hits}" -ge 3 ]; then
+        # 1. 晋升：直接全封整个 /16 大网段
         ipset add "${IPSET_NET16}" "${slash16}" -exist
 
-        # 2. 极致优化：既然已经封禁了 /16，就把该网段内原先单独存在的 /24 规则全部从内存擦除，释放资源
+        # 2. 极致性能优化：既然封了 /16，就把该大段下原先单独存在的零碎 /24 子规则从内存中擦除，释放内核空间
         while read -r active_ip || [ -n "${active_ip}" ]; do
             local active_s24
             active_s24="$(echo "${active_ip}" | awk -F. '{print $1"."$2"."$3".0/24"}')"
             ipset del "${IPSET_NET24}" "${active_s24}" 2>/dev/null || true
         done < "${counter_file}"
     else
-        # 否则：保持封禁其所属的 /24 网段
+        # 未达到大段封禁阈值：默认精准封禁其所属的 /24 窄段
         ipset add "${IPSET_NET24}" "${slash24}" -exist
     fi
 
@@ -297,17 +313,18 @@ remove_ip() {
     local counter_file="${COUNTER_DIR}/${safe_slash16}"
 
     if [ -f "${counter_file}" ]; then
-        # 从缓存计数器中移除此解封 IP
+        # 租约到期后，从计数缓存中移除该解封 IP
         sed -i "/^${ip}$/d" "${counter_file}"
         
         local hits
         hits=$(wc -l < "${counter_file}")
 
-        if [ "${hits}" -ge 5 ]; then
-            # 即使解封一个，剩余攻击源依然超过阈值，保持 /16 封禁
+        if [ "${hits}" -ge 3 ]; then
+            # 即使解封了一个，剩余恶意源依然 >=3，继续保持整个 /16 封禁
             ipset add "${IPSET_NET16}" "${slash16}" -exist
         elif [ "${hits}" -gt 0 ]; then
-            # 降级自愈：活跃攻击源降到 5 次以下，解除 /16 大网段封禁，将剩下还在租约内的 IP 退回到各自的 /24 封禁
+            # 降级自愈机制：恶意源降到 3 个以下，立刻解除整个 /16 的无辜连带封禁
+            # 将该网段内那些还在 fail2ban 租约期内的剩下几个攻击源，降级退回到各自的 /24 封禁
             ipset del "${IPSET_NET16}" "${slash16}" 2>/dev/null || true
             while read -r active_ip || [ -n "${active_ip}" ]; do
                 local active_s24
@@ -315,7 +332,7 @@ remove_ip() {
                 ipset add "${IPSET_NET24}" "${active_s24}" -exist
             done < "${counter_file}"
         else
-            # 该 /16 干净了，彻底全部解封
+            # 该 B 段内已完全没有活跃的恶意源了，彻底干净，全部移出
             ipset del "${IPSET_NET16}" "${slash16}" 2>/dev/null || true
             ipset del "${IPSET_NET24}" "${slash24}" 2>/dev/null || true
             rm -f "${counter_file}"
@@ -398,7 +415,6 @@ if [ -f "${JAIL_LOCAL}" ]; then
     cp "${JAIL_LOCAL}" "${JAIL_LOCAL}.$(date +%F_%H-%M-%S).bak"
 fi
 
-# ==================== 恢复标准 Fail2Ban 监测参数 ====================
 cat > "${JAIL_LOCAL}" << 'EOF5'
 [DEFAULT]
 bantime  = 7d
@@ -446,9 +462,10 @@ fail2ban-client status sshd-aggressive
 verify_network_or_restore
 
 echo "=========================================================="
-echo "✅ 渐进式双层封禁系统部署成功！"
-echo "  1) 默认封禁结构：依然对恶意源执行精密、安全的 /24 窄网段阻断。"
-echo "  2) B段升级机制：当同网段 /16 内累积触发满 3 次时，立即升级为 /16 大网段全封禁。"
-echo "  3) 极致优化：升级到 /16 后，内存中对应的 /24 零散规则将被自动擦除清理。"
-echo "  4) 降级解封：租约到期后自动减数，若脱离危险期自动退回 /24 级封禁，智能优雅。"
+echo "✅ 渐进式双层防扫描架构已成功平滑升级！"
+echo "  1) 已自动清理旧版单 IP 追踪体系以及残留的内核 IPset 集合。"
+echo "  2) 防御初始化：单个恶意 IP 触发将只对精确的 /24 C段网段实施阻断。"
+echo "  3) 自动晋升：同大段 /16 内累积触发满 3 次时，自动升级全封 /16 整个大段。"
+echo "  4) 内核解压：升级到 /16 后，内存中零碎的 /24 规则会被自动清理，维持极高查表性能。"
+echo "  5) 优雅自愈：解封期满后动态减数，脱离危险期自动退回 /24 级封禁，降低误杀率。"
 echo "=========================================================="
