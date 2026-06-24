@@ -106,7 +106,7 @@ EOS
 }
 
 restore_from_backup() {
-    echo "===> 网络检查失败，恢复安装前配置"
+    echo "===> 异常恢复：执行回滚流程"
     if [ -x "${UNINSTALL_SCRIPT}" ]; then
         "${UNINSTALL_SCRIPT}" || true
     fi
@@ -142,7 +142,7 @@ ensure_generated_files() {
 
     for f in "${required_files[@]}"; do
         if [ ! -s "${f}" ]; then
-            echo "❌ 关键文件未成功生成: ${f}"
+            echo "❌ 关键文件未成功生成或内容为空: ${f}"
             restore_from_backup
             exit 1
         fi
@@ -159,7 +159,7 @@ wait_for_fail2ban_ready() {
         sleep 1
     done
 
-    echo "❌ fail2ban 未能在预期时间内启动"
+    echo "❌ fail2ban 未能在预期时间内启动，正在输出错误日志："
     systemctl status fail2ban --no-pager || true
     journalctl -u fail2ban -n 50 --no-pager || true
     restore_from_backup
@@ -167,23 +167,18 @@ wait_for_fail2ban_ready() {
 }
 
 cleanup_legacy_fail2ban_configs() {
-    echo "===> 【平滑升级核心】正在清理旧版内核 IPset 及残留配置"
+    echo "===> 清理旧版内核 IPset 及残留配置"
 
-    # 1. 停止旧的 fail2ban，防止其在清理期间继续调用动作
     systemctl stop fail2ban >/dev/null 2>&1 || true
 
-    # 2. 如果已安装 ufw，通过强制重载 UFW 来一键擦除旧脚本在运行时直接强插在 iptables 里的旧规则
-    # 这一步至关重要，它能安全解除 iptables 对旧 ipset 集合的引用锁定
     if command -v ufw >/dev/null 2>&1; then
         ufw --force reload >/dev/null 2>&1 || true
     fi
 
-    # 3. 强行销毁内核中旧版不兼容/不再需要的 IPset 集合，防止新脚本因类型冲突崩溃
     ipset destroy f2b-blacklist >/dev/null 2>&1 || true
     ipset destroy f2b-blacklist24 >/dev/null 2>&1 || true
     rm -f /etc/ipset/f2b-ipset.rules
 
-    # 4. 彻底擦除旧版零散配置文件
     local legacy_files=(
         /etc/fail2ban/filter.d/sshd-disconnect.conf
         /etc/fail2ban/filter.d/sshd-ddos.conf
@@ -215,7 +210,7 @@ cat > /usr/local/bin/f2b-ipset-ensure.sh << 'EOS'
 #!/bin/bash
 set -euo pipefail
 
-# 彻底丢弃单 IP 追踪，全面升级为高性能的 hash:net 路由网段查表架构
+# 全面升级为高性能的 hash:net 网段查表架构
 IPSET_FILE="/etc/ipset/f2b-ipset.rules"
 # 默认窄段封禁：/24 C段
 IPSET_NET24="f2b-blacklist24"
@@ -225,7 +220,6 @@ IPSET_NET16="f2b-blacklist16"
 COUNTER_DIR="/etc/ipset/f2b-counters"
 
 ensure_sets() {
-    # 纠正为通用的 hash:net 结构类型
     ipset create "${IPSET_NET24}" hash:net family inet timeout 0 -exist
     ipset create "${IPSET_NET16}" hash:net family inet timeout 0 -exist
 }
@@ -399,14 +393,15 @@ actionban   = /usr/local/bin/f2b-ipset-ensure.sh add <ip>
 actionunban = /usr/local/bin/f2b-ipset-ensure.sh remove <ip>
 EOF3
 
+# ==================== 🛠️ 关键修正点：多行正则增加缩进 🛠 ====================
 cat > /etc/fail2ban/filter.d/sshd-aggressive.conf << 'EOF4'
 [Definition]
-failregex =^.sshd(?:\[\d+\])?: Invalid user .* from <HOST>(?: port \d+)?(?: ssh\d+)?\s*$
-^.sshd(?:\[\d+\])?: Failed password for (?Valid user )?.* from <HOST> port \d+(?: ssh\d+)?\s*$
-^.sshd(?:\[\d+\])?: Did not receive identification string from <HOST>\s*$
-^.sshd(?:\[\d+\])?: Connection closed by (?Valid user )?.* <HOST> port \d+ \[preauth\]\s*$
-^.sshd(?:\[\d+\])?: kex_exchange_identification: .* <HOST> port \d+\s*$
-^.sshd(?:\[\d+\])?: banner exchange: Connection from <HOST> port \d+:.*\s*$
+failregex = ^.sshd(?:\[\d+\])?: Invalid user .* from <HOST>(?: port \d+)?(?: ssh\d+)?\s*$
+            ^.sshd(?:\[\d+\])?: Failed password for (?:invalid user )?.* from <HOST> port \d+(?: ssh\d+)?\s*$
+            ^.sshd(?:\[\d+\])?: Did not receive identification string from <HOST>\s*$
+            ^.sshd(?:\[\d+\])?: Connection closed by (?:authenticating |invalid )?user .* <HOST> port \d+ \[preauth\]\s*$
+            ^.sshd(?:\[\d+\])?: kex_exchange_identification: .* <HOST> port \d+\s*$
+            ^.sshd(?:\[\d+\])?: banner exchange: Connection from <HOST> port \d+:.*\s*$
 ignoreregex =
 EOF4
 
@@ -462,8 +457,8 @@ fail2ban-client status sshd-aggressive
 verify_network_or_restore
 
 echo "=========================================================="
-echo "✅ 渐进式双层防扫描架构已成功平滑升级！"
-echo "  1) 已自动清理旧版单 IP 追踪体系以及残留的内核 IPset 集合。"
+echo "✅ 渐进式双层防扫描架构已成功平滑升级并彻底修复！"
+echo "  1) 修复了正则缺少缩进导致的 [key errors] 启动错误。"
 echo "  2) 防御初始化：单个恶意 IP 触发将只对精确的 /24 C段网段实施阻断。"
 echo "  3) 自动晋升：同大段 /16 内累积触发满 3 次时，自动升级全封 /16 整个大段。"
 echo "  4) 内核解压：升级到 /16 后，内存中零碎的 /24 规则会被自动清理，维持极高查表性能。"
