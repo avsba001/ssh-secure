@@ -245,7 +245,7 @@ Ciphers aes256-gcm@openssh.com,aes256-ctr
 # MAC
 # =========================
 
-MACs hmac-sha2-512@openssh.com
+MACs hmac-sha2-512
 
 
 
