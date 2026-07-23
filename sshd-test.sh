@@ -23,7 +23,7 @@ WORKDIR="${WORKDIR:-/var/tmp/firewall-ipset-guard}"
 STATE_DIR="${STATE_DIR:-/etc/fwguard-ipset}"
 PERSIST_DIR="${PERSIST_DIR:-/etc/iptables}"
 INSTALL_PATH="${INSTALL_PATH:-/usr/local/sbin/fwguard-firewall}"
-IPSET_PERSIST_FILE="$PERSIST_DIR/ipsets.rules"
+IPSET_PERSIST_FILE="$PERSIST_DIR/ipsets"
 CONFIRM_FILE="$WORKDIR/confirm-keep-rules"
 BACKUP_DIR="$WORKDIR/backup-$(date +%Y%m%d-%H%M%S)"
 ROLLBACK_SCRIPT="$BACKUP_DIR/rollback.sh"
@@ -57,7 +57,7 @@ run() {
 
 apt_install_missing() {
   local missing=()
-  local packages=(iptables ipset iptables-persistent netfilter-persistent curl iputils-ping systemd)
+  local packages=(iptables ipset ipset-persistent iptables-persistent netfilter-persistent curl iputils-ping systemd)
   local pkg
 
   for cmd in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore ipset ping curl systemctl; do
@@ -70,7 +70,7 @@ apt_install_missing() {
     exit 1
   fi
 
-  for pkg in iptables-persistent netfilter-persistent; do
+  for pkg in ipset-persistent iptables-persistent netfilter-persistent; do
     if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
       missing+=("$pkg")
     fi
@@ -104,6 +104,15 @@ validate_deps() {
       exit 1
     }
   done
+
+  if [[ "$ENABLE_IPV6" == "1" ]]; then
+    for cmd in ip6tables ip6tables-save ip6tables-restore; do
+      command -v "$cmd" >/dev/null 2>&1 || {
+        echo "ERROR: dependency still missing after install: $cmd" >&2
+        exit 1
+      }
+    done
+  fi
 }
 
 prompt_ssh_port() {
@@ -114,7 +123,7 @@ prompt_ssh_port() {
     return 0
   fi
 
-  read -r -p "请输入 SSH 端口 [22]: " input
+  read -r -p "SSH port [22]: " input
   SSH_PORT="${input:-22}"
   validate_ssh_port "$SSH_PORT"
 }
@@ -181,10 +190,12 @@ fi
 
 restore_file "$BACKUP_DIR/rules.v4.bak" "$PERSIST_DIR/rules.v4"
 restore_file "$BACKUP_DIR/rules.v6.bak" "$PERSIST_DIR/rules.v6"
-restore_file "$BACKUP_DIR/ipsets.rules.bak" "$IPSET_PERSIST_FILE"
+restore_file "$BACKUP_DIR/ipsets.bak" "$IPSET_PERSIST_FILE"
 restore_file "$BACKUP_DIR/config.bak" "$STATE_DIR/config"
 systemctl disable --now fwguard-ipset-refresh.timer >/dev/null 2>&1 || true
 systemctl disable --now fwguard-ipset-restore.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/netfilter-persistent.service.d/fwguard-ipset.conf
+systemctl daemon-reload >/dev/null 2>&1 || true
 echo "Rollback completed from $BACKUP_DIR"
 EOF
   chmod 700 "$ROLLBACK_SCRIPT"
@@ -393,19 +404,28 @@ install_self() {
 }
 
 install_systemd_units() {
+  run mkdir -p /etc/systemd/system/netfilter-persistent.service.d
+
   run tee /etc/systemd/system/fwguard-ipset-restore.service >/dev/null <<EOF
 [Unit]
 Description=Restore fwguard ipsets before persistent iptables
 DefaultDependencies=no
 Before=netfilter-persistent.service
 After=local-fs.target
+ConditionPathExists=!/usr/share/netfilter-persistent/plugins.d/10-ipset
 
 [Service]
 Type=oneshot
 ExecStart=/bin/sh -c 'test ! -s $IPSET_PERSIST_FILE || /usr/sbin/ipset restore -exist < $IPSET_PERSIST_FILE'
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=netfilter-persistent.service
+EOF
+
+  run tee /etc/systemd/system/netfilter-persistent.service.d/fwguard-ipset.conf >/dev/null <<EOF
+[Unit]
+Wants=fwguard-ipset-restore.service
+After=fwguard-ipset-restore.service
 EOF
 
   run tee /etc/systemd/system/fwguard-ipset-refresh.service >/dev/null <<EOF
@@ -435,6 +455,7 @@ EOF
 
   run systemctl daemon-reload
   run systemctl enable fwguard-ipset-restore.service
+  run systemctl restart fwguard-ipset-restore.service
   run systemctl enable --now fwguard-ipset-refresh.timer
   run systemctl enable netfilter-persistent.service >/dev/null 2>&1 || true
 }
@@ -477,6 +498,73 @@ rollback_latest() {
     exit 1
   }
   bash "$latest/rollback.sh"
+}
+
+diagnose_rules() {
+  need_root
+  load_config_if_present
+
+  echo "== System =="
+  uname -a || true
+  [[ -f /etc/os-release ]] && sed -n '1,8p' /etc/os-release || true
+  echo
+
+  echo "== Packages =="
+  dpkg-query -W ipset ipset-persistent iptables-persistent netfilter-persistent 2>/dev/null || true
+  echo
+
+  echo "== Installed Files =="
+  ls -l "$INSTALL_PATH" "$STATE_DIR/config" "$IPSET_PERSIST_FILE" "$PERSIST_DIR/rules.v4" "$PERSIST_DIR/rules.v6" 2>/dev/null || true
+  echo
+  echo "== Netfilter Persistent Plugins =="
+  ls -l /usr/share/netfilter-persistent/plugins.d 2>/dev/null || true
+  echo
+
+  echo "== Systemd Enable/Active State =="
+  for unit in fwguard-ipset-restore.service netfilter-persistent.service fwguard-ipset-refresh.timer fwguard-ipset-refresh.service; do
+    printf '%s: enabled=%s active=%s\n' \
+      "$unit" \
+      "$(systemctl is-enabled "$unit" 2>/dev/null || true)" \
+      "$(systemctl is-active "$unit" 2>/dev/null || true)"
+  done
+  echo
+
+  echo "== Systemd Ordering =="
+  systemctl cat fwguard-ipset-restore.service 2>/dev/null || true
+  systemctl cat netfilter-persistent.service 2>/dev/null || true
+  echo
+
+  echo "== Current Ipset State =="
+  for set_name in "$IPSET_CN4" "$IPSET_CN6" "$IPSET_CF4" "$IPSET_CF6"; do
+    if ipset list "$set_name" >/dev/null 2>&1; then
+      printf '%s entries: ' "$set_name"
+      ipset list "$set_name" | awk -F': ' '/Number of entries/ {print $2}'
+    else
+      echo "$set_name: missing"
+    fi
+  done
+  echo
+
+  echo "== Current Iptables Hooks =="
+  iptables -S INPUT 2>/dev/null | grep -E "$CHAIN_V4|$CHAIN_ICMP_V4|ESTABLISHED" || true
+  ip6tables -S INPUT 2>/dev/null | grep -E "$CHAIN_V6|$CHAIN_ICMP_V6|ESTABLISHED" || true
+  echo
+
+  echo "== Persistent Rule Test =="
+  if [[ -s "$PERSIST_DIR/rules.v4" ]]; then
+    iptables-restore --test < "$PERSIST_DIR/rules.v4" && echo "IPv4 rules.v4 test: OK" || echo "IPv4 rules.v4 test: FAILED"
+  else
+    echo "IPv4 rules.v4: missing or empty"
+  fi
+  if [[ -s "$PERSIST_DIR/rules.v6" ]]; then
+    ip6tables-restore --test < "$PERSIST_DIR/rules.v6" && echo "IPv6 rules.v6 test: OK" || echo "IPv6 rules.v6 test: FAILED"
+  else
+    echo "IPv6 rules.v6: missing or empty"
+  fi
+  echo
+
+  echo "== Boot Logs =="
+  journalctl -b --no-pager -u fwguard-ipset-restore.service -u netfilter-persistent.service -u fwguard-ipset-refresh.timer -u fwguard-ipset-refresh.service || true
 }
 
 print_summary() {
@@ -540,7 +628,7 @@ apply_rules() {
 
 usage() {
   cat <<EOF
-Usage: $0 [apply|confirm|rollback|refresh]
+Usage: $0 [apply|confirm|rollback|refresh|diagnose]
 
 Environment:
   SSH_PORT=2222              Skip interactive SSH port prompt
@@ -556,6 +644,7 @@ main() {
     confirm) confirm_rules ;;
     rollback) rollback_latest ;;
     refresh) refresh_ipsets ;;
+    diagnose|diag) diagnose_rules ;;
     -h|--help|help) usage ;;
     *)
       usage >&2
