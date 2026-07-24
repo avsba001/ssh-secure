@@ -17,6 +17,8 @@ CN_URL="${CN_URL:-https://www.ipdeny.com/ipblocks/data/countries/cn.zone}"
 CN_IPV6_URL="${CN_IPV6_URL:-https://www.ipdeny.com/ipv6/ipaddresses/blocks/cn.zone}"
 # Cloudflare 当前已识别的 ASN。可通过同名环境变量显式覆盖。
 CLOUDFLARE_ASNS="${CLOUDFLARE_ASNS:-AS13335 AS14789 AS132892 AS133877 AS202623 AS203898 AS209242 AS394536 AS395747 AS400095 AS402542}"
+CLOUDFLARE_ASN_AUTO_UPDATE="${CLOUDFLARE_ASN_AUTO_UPDATE:-1}"
+RIPESTAT_ASN_SEARCH_URL="${RIPESTAT_ASN_SEARCH_URL:-https://stat.ripe.net/data/searchcomplete/data.json}"
 RIPESTAT_ANNOUNCED_PREFIXES_URL="${RIPESTAT_ANNOUNCED_PREFIXES_URL:-https://stat.ripe.net/data/announced-prefixes/data.json}"
 CONNECTIVITY_TARGETS="${CONNECTIVITY_TARGETS:-1.1.1.1 8.8.8.8}"
 
@@ -159,6 +161,10 @@ normalize_cloudflare_asns() {
 
   if [[ -z "$normalized" ]]; then
     echo "错误：Cloudflare ASN 列表不能为空。" >&2
+    exit 1
+  fi
+  if [[ "$CLOUDFLARE_ASN_AUTO_UPDATE" != "0" && "$CLOUDFLARE_ASN_AUTO_UPDATE" != "1" ]]; then
+    echo "错误：CLOUDFLARE_ASN_AUTO_UPDATE 只能设置为 0 或 1。" >&2
     exit 1
   fi
   CLOUDFLARE_ASNS="$normalized"
@@ -326,8 +332,43 @@ download_cloudflare_asn_lists() {
   fi
 }
 
+discover_cloudflare_asns() {
+  local json_file discovered count
+
+  if [[ "$CLOUDFLARE_ASN_AUTO_UPDATE" != "1" ]]; then
+    echo "Cloudflare ASN 自动发现已关闭，使用配置中的 ASN 清单。"
+    return 0
+  fi
+
+  echo "正在从 RIPEstat 获取最新 Cloudflare ASN 清单……"
+  json_file="$STATE_DIR/cloudflare-asns.json"
+  fetch "${RIPESTAT_ASN_SEARCH_URL}?resource=Cloudflare" "$json_file"
+  if ! jq -e '.status == "ok" and (.data.categories | type == "array")' "$json_file" >/dev/null 2>&1; then
+    echo "错误：RIPEstat 返回的 Cloudflare ASN 清单无效，现有防火墙规则未更改。" >&2
+    exit 1
+  fi
+
+  discovered="$(jq -r '
+    .data.categories[]?
+    | select(.category == "ASNs")
+    | .suggestions[]?
+    | select((.description // "") | test("cloudflare"; "i"))
+    | .value
+  ' "$json_file" | grep -E '^AS[0-9]+$' | sort -u || true)"
+  count="$(printf '%s\n' "$discovered" | sed '/^$/d' | wc -l | tr -d ' ')"
+  if [[ "$count" -lt 2 ]] || ! grep -qx 'AS13335' <<< "$discovered"; then
+    echo "错误：自动发现的 Cloudflare ASN 清单不完整，现有防火墙规则未更改。" >&2
+    exit 1
+  fi
+
+  CLOUDFLARE_ASNS="$(tr '\n' ' ' <<< "$discovered" | xargs)"
+  normalize_cloudflare_asns
+  echo "已发现 $count 个 Cloudflare ASN：$CLOUDFLARE_ASNS"
+}
+
 download_lists() {
   mkdir -p "$STATE_DIR"
+  discover_cloudflare_asns
   download_cn_lists
   download_cloudflare_asn_lists
 }
@@ -338,8 +379,11 @@ load_one_set() {
   local list_file="$3"
   local tmp_set="${set_name}_tmp"
 
-  run ipset destroy "$tmp_set" 2>/dev/null || true
-  run ipset create "$tmp_set" hash:net family "$family" hashsize 65536 maxelem 1048576
+  if ipset list "$tmp_set" >/dev/null 2>&1; then
+    run ipset flush "$tmp_set"
+  else
+    run ipset create "$tmp_set" hash:net family "$family" hashsize 65536 maxelem 1048576
+  fi
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "[演练模式] 将从 $list_file 批量载入集合 $tmp_set。"
   else
@@ -348,7 +392,9 @@ load_one_set() {
     done < "$list_file" | ipset restore
   fi
 
-  run ipset create "$set_name" hash:net family "$family" hashsize 65536 maxelem 1048576 -exist
+  if ! ipset list "$set_name" >/dev/null 2>&1; then
+    run ipset create "$set_name" hash:net family "$family" hashsize 65536 maxelem 1048576
+  fi
   run ipset swap "$tmp_set" "$set_name"
   run ipset destroy "$tmp_set"
 }
@@ -500,6 +546,8 @@ ENABLE_IPV6="$ENABLE_IPV6"
 CN_URL="$CN_URL"
 CN_IPV6_URL="$CN_IPV6_URL"
 CLOUDFLARE_ASNS="$CLOUDFLARE_ASNS"
+CLOUDFLARE_ASN_AUTO_UPDATE="$CLOUDFLARE_ASN_AUTO_UPDATE"
+RIPESTAT_ASN_SEARCH_URL="$RIPESTAT_ASN_SEARCH_URL"
 RIPESTAT_ANNOUNCED_PREFIXES_URL="$RIPESTAT_ANNOUNCED_PREFIXES_URL"
 CONNECTIVITY_TARGETS="$CONNECTIVITY_TARGETS"
 WORKDIR="$WORKDIR"
@@ -601,6 +649,8 @@ load_config_if_present() {
     source "$STATE_DIR/config"
   fi
   CLOUDFLARE_ASNS="${CLOUDFLARE_ASNS:-AS13335 AS14789 AS132892 AS133877 AS202623 AS203898 AS209242 AS394536 AS395747 AS400095 AS402542}"
+  CLOUDFLARE_ASN_AUTO_UPDATE="${CLOUDFLARE_ASN_AUTO_UPDATE:-1}"
+  RIPESTAT_ASN_SEARCH_URL="${RIPESTAT_ASN_SEARCH_URL:-https://stat.ripe.net/data/searchcomplete/data.json}"
   RIPESTAT_ANNOUNCED_PREFIXES_URL="${RIPESTAT_ANNOUNCED_PREFIXES_URL:-https://stat.ripe.net/data/announced-prefixes/data.json}"
   normalize_cloudflare_asns
   IPSET_PERSIST_FILE="$PERSIST_DIR/ipsets"
@@ -669,6 +719,7 @@ diagnose_rules() {
   echo "SSH 端口：${SSH_PORT:-22}"
   echo "SSH 白名单来源：Cloudflare 全部 ASN 当前宣告前缀"
   echo "Cloudflare ASN：$CLOUDFLARE_ASNS"
+  echo "Cloudflare ASN 自动发现：$CLOUDFLARE_ASN_AUTO_UPDATE"
   echo
   echo "== Netfilter 持久化插件 =="
   ls -l /usr/share/netfilter-persistent/plugins.d 2>/dev/null || true
@@ -753,6 +804,7 @@ systemd 定时器：
 Cloudflare ASN IPv4 前缀：$cf4
 Cloudflare ASN IPv6 前缀：$cf6
 Cloudflare ASN：$CLOUDFLARE_ASNS
+Cloudflare ASN 自动发现：$CLOUDFLARE_ASN_AUTO_UPDATE
 SSH 端口：$SSH_PORT
 SSH 白名单：仅 Cloudflare 全部 ASN 当前宣告前缀
 EOF
@@ -808,7 +860,8 @@ usage() {
 
 环境变量：
   SSH_PORT=2222                    跳过 SSH 端口交互输入
-  CLOUDFLARE_ASNS="AS13335 ..."    覆盖 Cloudflare ASN 清单
+  CLOUDFLARE_ASNS="AS13335 ..."    配合关闭自动发现，覆盖 ASN 清单
+  CLOUDFLARE_ASN_AUTO_UPDATE=0      关闭 ASN 自动发现，固定使用配置清单
   ROLLBACK_SECONDS=300             未确认时等待多少秒后回滚
   ENABLE_IPV6=0                    禁用 IPv6 规则
   DRY_RUN=1                        尽可能只显示将执行的命令
