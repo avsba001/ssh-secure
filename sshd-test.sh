@@ -52,6 +52,22 @@ need_root() {
   fi
 }
 
+validate_script_source() {
+  local source_path="${BASH_SOURCE[0]:-}"
+
+  case "$source_path" in
+    /dev/fd/*|/proc/*/fd/*|/dev/stdin|"")
+      echo "错误：当前脚本通过临时文件描述符运行，无法可靠安装和持久化自身。" >&2
+      echo "请先将脚本保存为普通 .sh 文件，再执行：sudo bash 脚本文件 apply" >&2
+      exit 1
+      ;;
+  esac
+  if [[ ! -f "$source_path" || ! -s "$source_path" ]]; then
+    echo "错误：脚本源文件不存在或为空：$source_path" >&2
+    exit 1
+  fi
+}
+
 run() {
   if [[ "$DRY_RUN" == "1" ]]; then
     printf '[演练模式] '
@@ -65,6 +81,18 @@ run() {
 set_stage() {
   CURRENT_STAGE="$1"
   echo "当前阶段：$CURRENT_STAGE"
+}
+
+print_diagnose_hint() {
+  echo "可运行以下命令查看完整诊断：" >&2
+  if [[ -x "$INSTALL_PATH" ]]; then
+    printf '  sudo %q diagnose\n' "$INSTALL_PATH" >&2
+  elif [[ "${BASH_SOURCE[0]}" != /dev/fd/* && -f "${BASH_SOURCE[0]}" ]]; then
+    printf '  sudo bash %q diagnose\n' "${BASH_SOURCE[0]}" >&2
+  else
+    echo "  当前脚本通过临时 /dev/fd 路径运行，退出后该路径会失效。" >&2
+    echo "  请将脚本保存为本地文件后，再使用 diagnose 参数运行。" >&2
+  fi
 }
 
 handle_apply_error() {
@@ -92,8 +120,7 @@ handle_apply_error() {
   if [[ "$DRY_RUN" != "1" ]]; then
     bash "$ROLLBACK_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
   fi
-  echo "可运行以下命令查看完整诊断：" >&2
-  printf '  sudo bash %q diagnose\n' "${BASH_SOURCE[0]}" >&2
+  print_diagnose_hint
   exit "$exit_code"
 }
 
@@ -518,7 +545,12 @@ remove_input_jumps_to_chain() {
   local chain="$2"
   local spec
 
-  while spec="$("$table_cmd" -S INPUT 2>/dev/null | grep -- "-j $chain" | head -n 1 | sed 's/^-A INPUT /-D INPUT /')" && [[ -n "$spec" ]]; do
+  while true; do
+    spec="$("$table_cmd" -S INPUT 2>/dev/null \
+      | grep -- "-j $chain" \
+      | head -n 1 \
+      | sed 's/^-A INPUT /-D INPUT /' || true)"
+    [[ -n "$spec" ]] || break
     # shellcheck disable=SC2086
     run "$table_cmd" $spec
     [[ "$DRY_RUN" == "1" ]] && break
@@ -965,6 +997,7 @@ EOF
 }
 
 apply_rules() {
+  validate_script_source
   need_root
   set_stage "检查并安装依赖"
   apt_install_missing
