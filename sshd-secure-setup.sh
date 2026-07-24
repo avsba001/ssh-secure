@@ -151,7 +151,7 @@ PermitTunnel no
 Compression $COMPRESS
 
 # ===== 加密算法 =====
-KexAlgorithms curve25519-sha256
+KexAlgorithms sntrup761x25519-sha512,curve25519-sha256
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com
 MACs hmac-sha2-512-etm@openssh.com
 
