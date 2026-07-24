@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Debian 12 firewall guard:
-# 1. Drop ICMP/ICMPv6 from China IP ranges.
-# 2. Allow SSH only from Cloudflare and China IP ranges.
-# 3. Use ipset for fast matching.
-# 4. Persist rules, refresh IP ranges by systemd timer, and rollback automatically.
+# Debian 12 防火墙保护脚本：
+# 1. 屏蔽来自中国 IP 段的 ICMP/ICMPv6。
+# 2. SSH 仅允许 Cloudflare 全部 ASN 当前宣告的 IP 前缀访问。
+# 3. 使用 ipset 提升匹配性能。
+# 4. 持久化规则、定时更新 IP 段，并在异常时自动回滚。
 
 SSH_PORT="${SSH_PORT:-}"
 ROLLBACK_SECONDS="${ROLLBACK_SECONDS:-180}"
@@ -15,8 +15,9 @@ DRY_RUN="${DRY_RUN:-0}"
 
 CN_URL="${CN_URL:-https://www.ipdeny.com/ipblocks/data/countries/cn.zone}"
 CN_IPV6_URL="${CN_IPV6_URL:-https://www.ipdeny.com/ipv6/ipaddresses/blocks/cn.zone}"
-CF_IPV4_URL="${CF_IPV4_URL:-https://www.cloudflare.com/ips-v4}"
-CF_IPV6_URL="${CF_IPV6_URL:-https://www.cloudflare.com/ips-v6}"
+# Cloudflare 当前已识别的 ASN。可通过同名环境变量显式覆盖。
+CLOUDFLARE_ASNS="${CLOUDFLARE_ASNS:-AS13335 AS14789 AS132892 AS133877 AS202623 AS203898 AS209242 AS394536 AS395747 AS400095 AS402542}"
+RIPESTAT_ANNOUNCED_PREFIXES_URL="${RIPESTAT_ANNOUNCED_PREFIXES_URL:-https://stat.ripe.net/data/announced-prefixes/data.json}"
 CONNECTIVITY_TARGETS="${CONNECTIVITY_TARGETS:-1.1.1.1 8.8.8.8}"
 
 WORKDIR="${WORKDIR:-/var/tmp/firewall-ipset-guard}"
@@ -24,6 +25,7 @@ STATE_DIR="${STATE_DIR:-/etc/fwguard-ipset}"
 PERSIST_DIR="${PERSIST_DIR:-/etc/iptables}"
 INSTALL_PATH="${INSTALL_PATH:-/usr/local/sbin/fwguard-firewall}"
 IPSET_PERSIST_FILE="$PERSIST_DIR/ipsets"
+LEGACY_IPSET_PERSIST_FILE="$PERSIST_DIR/ipsets.rules"
 CONFIRM_FILE="$WORKDIR/confirm-keep-rules"
 BACKUP_DIR="$WORKDIR/backup-$(date +%Y%m%d-%H%M%S)"
 ROLLBACK_SCRIPT="$BACKUP_DIR/rollback.sh"
@@ -33,21 +35,23 @@ IPSET_CN4="fwguard_cn_ipv4"
 IPSET_CN6="fwguard_cn_ipv6"
 IPSET_CF4="fwguard_cloudflare_ipv4"
 IPSET_CF6="fwguard_cloudflare_ipv6"
-CHAIN_V4="SSH_CF_CN_GUARD"
+CHAIN_V4="SSH_CF_ASN_GUARD"
 CHAIN_ICMP_V4="CN_ICMP_DROP"
-CHAIN_V6="SSH_CF_CN_GUARD_V6"
+CHAIN_V6="SSH_CF_ASN_GUARD_V6"
 CHAIN_ICMP_V6="CN_ICMP_DROP_V6"
+LEGACY_CHAIN_V4="SSH_CF_CN_GUARD"
+LEGACY_CHAIN_V6="SSH_CF_CN_GUARD_V6"
 
 need_root() {
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    echo "ERROR: run as root." >&2
+    echo "错误：请使用 root 用户运行此脚本。" >&2
     exit 1
   fi
 }
 
 run() {
   if [[ "$DRY_RUN" == "1" ]]; then
-    printf '[dry-run] '
+    printf '[演练模式] '
     printf '%q ' "$@"
     printf '\n'
   else
@@ -57,16 +61,16 @@ run() {
 
 apt_install_missing() {
   local missing=()
-  local packages=(iptables ipset ipset-persistent iptables-persistent netfilter-persistent curl iputils-ping systemd)
+  local packages=(iptables ipset ipset-persistent iptables-persistent netfilter-persistent curl jq iputils-ping systemd)
   local pkg
 
-  for cmd in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore ipset ping curl systemctl; do
+  for cmd in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore ipset ping curl jq systemctl; do
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
   done
 
   if ! command -v apt-get >/dev/null 2>&1; then
-    echo "ERROR: missing commands: ${missing[*]}" >&2
-    echo "ERROR: apt-get not found. This script defaults to Debian 12." >&2
+    echo "错误：缺少命令：${missing[*]}" >&2
+    echo "错误：未找到 apt-get；此脚本默认支持 Debian 12。" >&2
     exit 1
   fi
 
@@ -78,8 +82,8 @@ apt_install_missing() {
 
   [[ "${#missing[@]}" -eq 0 ]] && return 0
 
-  echo "Missing dependencies/packages: ${missing[*]}"
-  echo "Installing Debian 12 packages: ${packages[*]}"
+  echo "检测到缺失的依赖或软件包：${missing[*]}"
+  echo "正在安装 Debian 12 软件包：${packages[*]}"
 
   if [[ "$DRY_RUN" == "1" ]]; then
     run env DEBIAN_FRONTEND=noninteractive apt-get update
@@ -98,9 +102,9 @@ apt_install_missing() {
 
 validate_deps() {
   local cmd
-  for cmd in iptables iptables-save iptables-restore ipset ping curl systemctl; do
+  for cmd in iptables iptables-save iptables-restore ipset ping curl jq systemctl; do
     command -v "$cmd" >/dev/null 2>&1 || {
-      echo "ERROR: dependency still missing after install: $cmd" >&2
+      echo "错误：安装后仍缺少依赖命令：$cmd" >&2
       exit 1
     }
   done
@@ -108,7 +112,7 @@ validate_deps() {
   if [[ "$ENABLE_IPV6" == "1" ]]; then
     for cmd in ip6tables ip6tables-save ip6tables-restore; do
       command -v "$cmd" >/dev/null 2>&1 || {
-        echo "ERROR: dependency still missing after install: $cmd" >&2
+        echo "错误：安装后仍缺少依赖命令：$cmd" >&2
         exit 1
       }
     done
@@ -123,7 +127,7 @@ prompt_ssh_port() {
     return 0
   fi
 
-  read -r -p "SSH port [22]: " input
+  read -r -p "请输入 SSH 端口 [默认 22]：" input
   SSH_PORT="${input:-22}"
   validate_ssh_port "$SSH_PORT"
 }
@@ -131,9 +135,33 @@ prompt_ssh_port() {
 validate_ssh_port() {
   local port="$1"
   if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
-    echo "ERROR: invalid SSH port: $port" >&2
+    echo "错误：SSH 端口无效：$port" >&2
     exit 1
   fi
+}
+
+normalize_cloudflare_asns() {
+  local raw="$CLOUDFLARE_ASNS"
+  local token normalized=""
+
+  raw="${raw//,/ }"
+  for token in $raw; do
+    token="${token^^}"
+    [[ "$token" == AS* ]] || token="AS$token"
+    if ! [[ "$token" =~ ^AS[0-9]+$ ]]; then
+      echo "错误：Cloudflare ASN 格式无效：$token" >&2
+      exit 1
+    fi
+    if [[ " $normalized " != *" $token "* ]]; then
+      normalized="${normalized:+$normalized }$token"
+    fi
+  done
+
+  if [[ -z "$normalized" ]]; then
+    echo "错误：Cloudflare ASN 列表不能为空。" >&2
+    exit 1
+  fi
+  CLOUDFLARE_ASNS="$normalized"
 }
 
 fetch() {
@@ -160,6 +188,7 @@ backup_rules() {
   backup_file "$PERSIST_DIR/rules.v4"
   backup_file "$PERSIST_DIR/rules.v6"
   backup_file "$IPSET_PERSIST_FILE"
+  backup_file "$LEGACY_IPSET_PERSIST_FILE"
   backup_file "$STATE_DIR/config"
 
   cat > "$ROLLBACK_SCRIPT" <<EOF
@@ -180,10 +209,14 @@ if [[ -f "$BACKUP_DIR/ip6tables.runtime.rules" ]] && command -v ip6tables-restor
   ip6tables-restore < "$BACKUP_DIR/ip6tables.runtime.rules" || true
 fi
 iptables-restore < "$BACKUP_DIR/iptables.runtime.rules"
-ipset destroy "$IPSET_CN4" 2>/dev/null || true
-ipset destroy "$IPSET_CN6" 2>/dev/null || true
-ipset destroy "$IPSET_CF4" 2>/dev/null || true
-ipset destroy "$IPSET_CF6" 2>/dev/null || true
+while IFS= read -r set_name; do
+  [[ "\$set_name" == fwguard_* ]] || continue
+  if grep -Fq "create \$set_name " "$BACKUP_DIR/ipset.runtime.rules" 2>/dev/null; then
+    ipset flush "\$set_name" 2>/dev/null || true
+  else
+    ipset destroy "\$set_name" 2>/dev/null || true
+  fi
+done < <(ipset list -name 2>/dev/null || true)
 if [[ -s "$BACKUP_DIR/ipset.runtime.rules" ]]; then
   ipset restore -exist < "$BACKUP_DIR/ipset.runtime.rules" || true
 fi
@@ -191,12 +224,13 @@ fi
 restore_file "$BACKUP_DIR/rules.v4.bak" "$PERSIST_DIR/rules.v4"
 restore_file "$BACKUP_DIR/rules.v6.bak" "$PERSIST_DIR/rules.v6"
 restore_file "$BACKUP_DIR/ipsets.bak" "$IPSET_PERSIST_FILE"
+restore_file "$BACKUP_DIR/ipsets.rules.bak" "$LEGACY_IPSET_PERSIST_FILE"
 restore_file "$BACKUP_DIR/config.bak" "$STATE_DIR/config"
 systemctl disable --now fwguard-ipset-refresh.timer >/dev/null 2>&1 || true
 systemctl disable --now fwguard-ipset-restore.service >/dev/null 2>&1 || true
 rm -f /etc/systemd/system/netfilter-persistent.service.d/fwguard-ipset.conf
 systemctl daemon-reload >/dev/null 2>&1 || true
-echo "Rollback completed from $BACKUP_DIR"
+echo "已使用 $BACKUP_DIR 中的备份完成回滚。"
 EOF
   chmod 700 "$ROLLBACK_SCRIPT"
 }
@@ -205,44 +239,97 @@ start_rollback_guard() {
   rm -f "$CONFIRM_FILE"
 
   if [[ "$DRY_RUN" == "1" ]]; then
-    echo "[dry-run] rollback guard would run after ${ROLLBACK_SECONDS}s"
+    echo "[演练模式] 回滚保护将在 ${ROLLBACK_SECONDS} 秒后触发。"
     return
   fi
 
   nohup bash -c "
     sleep '$ROLLBACK_SECONDS'
     if [[ ! -f '$CONFIRM_FILE' ]]; then
-      echo \"No confirmation file found; rolling back.\" >> '$LOG_FILE'
+      echo \"未找到确认文件，正在自动回滚。\" >> '$LOG_FILE'
       bash '$ROLLBACK_SCRIPT' >> '$LOG_FILE' 2>&1
     fi
   " >/dev/null 2>&1 &
   echo "$!" > "$BACKUP_DIR/rollback-guard.pid"
 }
 
-download_lists() {
-  mkdir -p "$STATE_DIR"
+migrate_legacy_state() {
+  mkdir -p "$PERSIST_DIR"
+  if [[ ! -s "$IPSET_PERSIST_FILE" && -s "$LEGACY_IPSET_PERSIST_FILE" ]]; then
+    echo "检测到旧版 ipset 持久化文件，正在迁移：$LEGACY_IPSET_PERSIST_FILE"
+    run cp -a "$LEGACY_IPSET_PERSIST_FILE" "$IPSET_PERSIST_FILE"
+  fi
+}
+
+download_cn_lists() {
+  echo "正在下载中国 IPv4 地址段（仅用于 ICMP 屏蔽）……"
   fetch "$CN_URL" "$STATE_DIR/cn.zone"
-  fetch "$CF_IPV4_URL" "$STATE_DIR/cloudflare-ips-v4"
-
   grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' "$STATE_DIR/cn.zone" > "$STATE_DIR/cn-v4.clean" || true
-  grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' "$STATE_DIR/cloudflare-ips-v4" > "$STATE_DIR/cf-v4.clean" || true
-
-  if [[ ! -s "$STATE_DIR/cn-v4.clean" || ! -s "$STATE_DIR/cf-v4.clean" ]]; then
-    echo "ERROR: downloaded IPv4 lists are empty or invalid." >&2
+  if [[ ! -s "$STATE_DIR/cn-v4.clean" ]]; then
+    echo "错误：下载的中国 IPv4 地址段为空或格式无效。" >&2
     exit 1
   fi
 
   if [[ "$ENABLE_IPV6" == "1" ]]; then
+    echo "正在下载中国 IPv6 地址段（仅用于 ICMP 屏蔽）……"
     fetch "$CN_IPV6_URL" "$STATE_DIR/cn-v6.zone"
-    fetch "$CF_IPV6_URL" "$STATE_DIR/cloudflare-ips-v6"
     grep -E '^[0-9a-fA-F:]+/[0-9]+$' "$STATE_DIR/cn-v6.zone" > "$STATE_DIR/cn-v6.clean" || true
-    grep -E '^[0-9a-fA-F:]+/[0-9]+$' "$STATE_DIR/cloudflare-ips-v6" > "$STATE_DIR/cf-v6.clean" || true
-
-    if [[ ! -s "$STATE_DIR/cn-v6.clean" || ! -s "$STATE_DIR/cf-v6.clean" ]]; then
-      echo "ERROR: downloaded IPv6 lists are empty or invalid." >&2
+    if [[ ! -s "$STATE_DIR/cn-v6.clean" ]]; then
+      echo "错误：下载的中国 IPv6 地址段为空或格式无效。" >&2
       exit 1
     fi
   fi
+}
+
+download_cloudflare_asn_lists() {
+  local asn json_file tmp4 tmp6=""
+  tmp4="$(mktemp "$STATE_DIR/cf-v4.clean.XXXXXX")"
+  [[ "$ENABLE_IPV6" == "1" ]] && tmp6="$(mktemp "$STATE_DIR/cf-v6.clean.XXXXXX")"
+
+  for asn in $CLOUDFLARE_ASNS; do
+    echo "正在获取 Cloudflare $asn 当前宣告的 IP 前缀……"
+    json_file="$STATE_DIR/cloudflare-${asn}.json"
+    fetch "${RIPESTAT_ANNOUNCED_PREFIXES_URL}?resource=${asn}" "$json_file"
+    if ! jq -e '.status == "ok" and (.data.prefixes | type == "array")' "$json_file" >/dev/null 2>&1; then
+      rm -f "$tmp4"
+      [[ -n "$tmp6" ]] && rm -f "$tmp6"
+      echo "错误：RIPEstat 返回的 $asn 前缀数据无效。" >&2
+      exit 1
+    fi
+    jq -r '.data.prefixes[]?.prefix // empty' "$json_file" \
+      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' >> "$tmp4" || true
+    if [[ "$ENABLE_IPV6" == "1" ]]; then
+      jq -r '.data.prefixes[]?.prefix // empty' "$json_file" \
+        | grep -E '^[0-9a-fA-F:]+/[0-9]+$' >> "$tmp6" || true
+    fi
+  done
+
+  sort -u -o "$tmp4" "$tmp4"
+  if [[ ! -s "$tmp4" ]]; then
+    rm -f "$tmp4"
+    [[ -n "$tmp6" ]] && rm -f "$tmp6"
+    echo "错误：Cloudflare 全部 ASN 的 IPv4 前缀汇总为空。" >&2
+    exit 1
+  fi
+  install -m 0600 "$tmp4" "$STATE_DIR/cf-v4.clean"
+  rm -f "$tmp4"
+
+  if [[ "$ENABLE_IPV6" == "1" ]]; then
+    sort -u -o "$tmp6" "$tmp6"
+    if [[ ! -s "$tmp6" ]]; then
+      rm -f "$tmp6"
+      echo "错误：Cloudflare 全部 ASN 的 IPv6 前缀汇总为空。" >&2
+      exit 1
+    fi
+    install -m 0600 "$tmp6" "$STATE_DIR/cf-v6.clean"
+    rm -f "$tmp6"
+  fi
+}
+
+download_lists() {
+  mkdir -p "$STATE_DIR"
+  download_cn_lists
+  download_cloudflare_asn_lists
 }
 
 load_one_set() {
@@ -251,13 +338,17 @@ load_one_set() {
   local list_file="$3"
   local tmp_set="${set_name}_tmp"
 
-  run ipset create "$tmp_set" hash:net family "$family" -exist
-  run ipset flush "$tmp_set"
-  while IFS= read -r cidr; do
-    [[ -n "$cidr" ]] && run ipset add "$tmp_set" "$cidr" -exist
-  done < "$list_file"
+  run ipset destroy "$tmp_set" 2>/dev/null || true
+  run ipset create "$tmp_set" hash:net family "$family" hashsize 65536 maxelem 1048576
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[演练模式] 将从 $list_file 批量载入集合 $tmp_set。"
+  else
+    while IFS= read -r cidr; do
+      [[ -n "$cidr" ]] && printf 'add %s %s -exist\n' "$tmp_set" "$cidr"
+    done < "$list_file" | ipset restore
+  fi
 
-  run ipset create "$set_name" hash:net family "$family" -exist
+  run ipset create "$set_name" hash:net family "$family" hashsize 65536 maxelem 1048576 -exist
   run ipset swap "$tmp_set" "$set_name"
   run ipset destroy "$tmp_set"
 }
@@ -305,12 +396,14 @@ remove_input_jumps_to_chain() {
 
 apply_ipv4_rules() {
   remove_input_jumps_to_chain iptables "$CHAIN_V4"
+  remove_input_jumps_to_chain iptables "$LEGACY_CHAIN_V4"
   remove_input_jumps_to_chain iptables "$CHAIN_ICMP_V4"
+  run iptables -F "$LEGACY_CHAIN_V4" 2>/dev/null || true
+  run iptables -X "$LEGACY_CHAIN_V4" 2>/dev/null || true
 
   run iptables -N "$CHAIN_V4" 2>/dev/null || true
   run iptables -F "$CHAIN_V4"
   run iptables -A "$CHAIN_V4" -m set --match-set "$IPSET_CF4" src -j ACCEPT
-  run iptables -A "$CHAIN_V4" -m set --match-set "$IPSET_CN4" src -j ACCEPT
   run iptables -A "$CHAIN_V4" -j DROP
 
   run iptables -N "$CHAIN_ICMP_V4" 2>/dev/null || true
@@ -324,15 +417,29 @@ apply_ipv4_rules() {
 }
 
 apply_ipv6_rules() {
-  [[ "$ENABLE_IPV6" == "1" ]] || return 0
+  if [[ "$ENABLE_IPV6" != "1" ]]; then
+    command -v ip6tables >/dev/null 2>&1 || return 0
+    remove_input_jumps_to_chain ip6tables "$CHAIN_V6"
+    remove_input_jumps_to_chain ip6tables "$LEGACY_CHAIN_V6"
+    remove_input_jumps_to_chain ip6tables "$CHAIN_ICMP_V6"
+    run ip6tables -F "$CHAIN_V6" 2>/dev/null || true
+    run ip6tables -X "$CHAIN_V6" 2>/dev/null || true
+    run ip6tables -F "$CHAIN_ICMP_V6" 2>/dev/null || true
+    run ip6tables -X "$CHAIN_ICMP_V6" 2>/dev/null || true
+    run ip6tables -F "$LEGACY_CHAIN_V6" 2>/dev/null || true
+    run ip6tables -X "$LEGACY_CHAIN_V6" 2>/dev/null || true
+    return 0
+  fi
 
   remove_input_jumps_to_chain ip6tables "$CHAIN_V6"
+  remove_input_jumps_to_chain ip6tables "$LEGACY_CHAIN_V6"
   remove_input_jumps_to_chain ip6tables "$CHAIN_ICMP_V6"
+  run ip6tables -F "$LEGACY_CHAIN_V6" 2>/dev/null || true
+  run ip6tables -X "$LEGACY_CHAIN_V6" 2>/dev/null || true
 
   run ip6tables -N "$CHAIN_V6" 2>/dev/null || true
   run ip6tables -F "$CHAIN_V6"
   run ip6tables -A "$CHAIN_V6" -m set --match-set "$IPSET_CF6" src -j ACCEPT
-  run ip6tables -A "$CHAIN_V6" -m set --match-set "$IPSET_CN6" src -j ACCEPT
   run ip6tables -A "$CHAIN_V6" -j DROP
 
   run ip6tables -N "$CHAIN_ICMP_V6" 2>/dev/null || true
@@ -343,6 +450,26 @@ apply_ipv6_rules() {
   [[ "$ALLOW_ESTABLISHED" == "1" ]] && ensure_established_rule ip6tables
   ensure_jump ip6tables "$CHAIN_V6" tcp 2 --dport "$SSH_PORT"
   ensure_jump ip6tables "$CHAIN_ICMP_V6" ipv6-icmp 2
+}
+
+remove_legacy_country_whitelists() {
+  local region set_name
+
+  echo "正在清理旧版国家/地区 SSH 白名单……"
+  for region in us jp hk tw; do
+    set_name="fwguard_${region}_ipv4"
+    run ipset destroy "$set_name" 2>/dev/null || true
+    set_name="fwguard_${region}_ipv6"
+    run ipset destroy "$set_name" 2>/dev/null || true
+    run rm -f "$STATE_DIR/${region}.zone" "$STATE_DIR/${region}-v4.clean"
+    run rm -f "$STATE_DIR/${region}-v6.zone" "$STATE_DIR/${region}-v6.clean"
+  done
+  run rm -f "$STATE_DIR/cloudflare-ips-v4" "$STATE_DIR/cloudflare-ips-v6"
+
+  if [[ "$ENABLE_IPV6" != "1" ]]; then
+    run ipset destroy "$IPSET_CN6" 2>/dev/null || true
+    run ipset destroy "$IPSET_CF6" 2>/dev/null || true
+  fi
 }
 
 connectivity_check() {
@@ -357,7 +484,7 @@ connectivity_check() {
   done
 
   if [[ "$ok" != "1" ]]; then
-    echo "ERROR: connectivity check failed; rolling back." >&2
+    echo "错误：联网检查失败，正在回滚。" >&2
     [[ "$DRY_RUN" == "1" ]] || bash "$ROLLBACK_SCRIPT"
     exit 1
   fi
@@ -372,8 +499,8 @@ ALLOW_ESTABLISHED="$ALLOW_ESTABLISHED"
 ENABLE_IPV6="$ENABLE_IPV6"
 CN_URL="$CN_URL"
 CN_IPV6_URL="$CN_IPV6_URL"
-CF_IPV4_URL="$CF_IPV4_URL"
-CF_IPV6_URL="$CF_IPV6_URL"
+CLOUDFLARE_ASNS="$CLOUDFLARE_ASNS"
+RIPESTAT_ANNOUNCED_PREFIXES_URL="$RIPESTAT_ANNOUNCED_PREFIXES_URL"
 CONNECTIVITY_TARGETS="$CONNECTIVITY_TARGETS"
 WORKDIR="$WORKDIR"
 STATE_DIR="$STATE_DIR"
@@ -385,16 +512,24 @@ EOF
 persist_rules() {
   local set_name
   local tmp_file
+  local set_names=("$IPSET_CN4" "$IPSET_CF4")
+
+  if [[ "$ENABLE_IPV6" == "1" ]]; then
+    set_names+=("$IPSET_CN6" "$IPSET_CF6")
+  fi
 
   mkdir -p "$PERSIST_DIR"
   tmp_file="$(mktemp)"
-  for set_name in "$IPSET_CN4" "$IPSET_CN6" "$IPSET_CF4" "$IPSET_CF6"; do
-    ipset list "$set_name" >/dev/null 2>&1 && ipset save "$set_name" >> "$tmp_file"
+  for set_name in "${set_names[@]}"; do
+    ipset save "$set_name" >> "$tmp_file"
   done
   install -m 0600 "$tmp_file" "$IPSET_PERSIST_FILE"
+  if [[ -e "$LEGACY_IPSET_PERSIST_FILE" ]]; then
+    install -m 0600 "$tmp_file" "$LEGACY_IPSET_PERSIST_FILE"
+  fi
   rm -f "$tmp_file"
   iptables-save > "$PERSIST_DIR/rules.v4"
-  [[ "$ENABLE_IPV6" == "1" ]] && ip6tables-save > "$PERSIST_DIR/rules.v6"
+  command -v ip6tables-save >/dev/null 2>&1 && ip6tables-save > "$PERSIST_DIR/rules.v6"
 }
 
 install_self() {
@@ -408,7 +543,7 @@ install_systemd_units() {
 
   run tee /etc/systemd/system/fwguard-ipset-restore.service >/dev/null <<EOF
 [Unit]
-Description=Restore fwguard ipsets before persistent iptables
+Description=在持久化 iptables 规则前恢复 fwguard ipset
 DefaultDependencies=no
 Before=netfilter-persistent.service
 After=local-fs.target
@@ -430,7 +565,7 @@ EOF
 
   run tee /etc/systemd/system/fwguard-ipset-refresh.service >/dev/null <<EOF
 [Unit]
-Description=Refresh Cloudflare and China ipsets for fwguard
+Description=更新 fwguard 的 Cloudflare ASN 和中国 ICMP 地址段
 Wants=network-online.target
 After=network-online.target
 
@@ -441,7 +576,7 @@ EOF
 
   run tee /etc/systemd/system/fwguard-ipset-refresh.timer >/dev/null <<EOF
 [Unit]
-Description=Daily fwguard ipset refresh
+Description=每日更新 fwguard IP 地址段
 
 [Timer]
 OnBootSec=10min
@@ -465,6 +600,12 @@ load_config_if_present() {
     # shellcheck disable=SC1091
     source "$STATE_DIR/config"
   fi
+  CLOUDFLARE_ASNS="${CLOUDFLARE_ASNS:-AS13335 AS14789 AS132892 AS133877 AS202623 AS203898 AS209242 AS394536 AS395747 AS400095 AS402542}"
+  RIPESTAT_ANNOUNCED_PREFIXES_URL="${RIPESTAT_ANNOUNCED_PREFIXES_URL:-https://stat.ripe.net/data/announced-prefixes/data.json}"
+  normalize_cloudflare_asns
+  IPSET_PERSIST_FILE="$PERSIST_DIR/ipsets"
+  LEGACY_IPSET_PERSIST_FILE="$PERSIST_DIR/ipsets.rules"
+  CONFIRM_FILE="$WORKDIR/confirm-keep-rules"
 }
 
 refresh_ipsets() {
@@ -474,96 +615,116 @@ refresh_ipsets() {
   load_config_if_present
   validate_ssh_port "${SSH_PORT:-22}"
   SSH_PORT="${SSH_PORT:-22}"
+  migrate_legacy_state
   download_lists
   load_ipsets
   apply_ipv4_rules
   apply_ipv6_rules
+  remove_legacy_country_whitelists
+  write_config
   persist_rules
-  echo "Refreshed ipsets and persisted firewall rules."
+  echo "Cloudflare ASN 前缀和中国 ICMP 地址段已更新，防火墙规则已重新持久化。"
 }
 
 confirm_rules() {
   need_root
+  load_config_if_present
   mkdir -p "$WORKDIR"
   touch "$CONFIRM_FILE"
-  echo "Confirmed. Rollback guard will leave the persistent rules in place."
+  echo "已确认保留规则，回滚保护不会恢复旧配置。"
 }
 
 rollback_latest() {
   need_root
   local latest
+  load_config_if_present
   latest="$(ls -dt "$WORKDIR"/backup-* 2>/dev/null | head -n 1 || true)"
   [[ -n "${latest:-}" && -x "$latest/rollback.sh" ]] || {
-    echo "ERROR: no rollback backup found under $WORKDIR." >&2
+    echo "错误：在 $WORKDIR 下未找到可用的回滚备份。" >&2
     exit 1
   }
   bash "$latest/rollback.sh"
 }
 
 diagnose_rules() {
+  local set_name
   need_root
   load_config_if_present
 
-  echo "== System =="
+  echo "== 系统信息 =="
   uname -a || true
   [[ -f /etc/os-release ]] && sed -n '1,8p' /etc/os-release || true
   echo
 
-  echo "== Packages =="
-  dpkg-query -W ipset ipset-persistent iptables-persistent netfilter-persistent 2>/dev/null || true
+  echo "== 软件包状态 =="
+  dpkg-query -W ipset ipset-persistent iptables-persistent netfilter-persistent jq 2>/dev/null || true
   echo
 
-  echo "== Installed Files =="
-  ls -l "$INSTALL_PATH" "$STATE_DIR/config" "$IPSET_PERSIST_FILE" "$PERSIST_DIR/rules.v4" "$PERSIST_DIR/rules.v6" 2>/dev/null || true
+  echo "== 已安装文件 =="
+  ls -l "$INSTALL_PATH" "$STATE_DIR/config" "$IPSET_PERSIST_FILE" "$LEGACY_IPSET_PERSIST_FILE" "$PERSIST_DIR/rules.v4" "$PERSIST_DIR/rules.v6" 2>/dev/null || true
   echo
-  echo "== Netfilter Persistent Plugins =="
+  if [[ -s "$LEGACY_IPSET_PERSIST_FILE" ]]; then
+    echo "提示：检测到旧版持久化文件 $LEGACY_IPSET_PERSIST_FILE。"
+  fi
+  echo "SSH 端口：${SSH_PORT:-22}"
+  echo "SSH 白名单来源：Cloudflare 全部 ASN 当前宣告前缀"
+  echo "Cloudflare ASN：$CLOUDFLARE_ASNS"
+  echo
+  echo "== Netfilter 持久化插件 =="
   ls -l /usr/share/netfilter-persistent/plugins.d 2>/dev/null || true
   echo
 
-  echo "== Systemd Enable/Active State =="
+  echo "== systemd 启用和运行状态 =="
   for unit in fwguard-ipset-restore.service netfilter-persistent.service fwguard-ipset-refresh.timer fwguard-ipset-refresh.service; do
-    printf '%s: enabled=%s active=%s\n' \
+    printf '%s：启用状态=%s，运行状态=%s\n' \
       "$unit" \
       "$(systemctl is-enabled "$unit" 2>/dev/null || true)" \
       "$(systemctl is-active "$unit" 2>/dev/null || true)"
   done
   echo
 
-  echo "== Systemd Ordering =="
+  echo "== systemd 启动顺序 =="
   systemctl cat fwguard-ipset-restore.service 2>/dev/null || true
   systemctl cat netfilter-persistent.service 2>/dev/null || true
   echo
 
-  echo "== Current Ipset State =="
+  echo "== 当前 ipset 状态 =="
+  echo "说明：fwguard_cn_* 仅用于中国 ICMP 屏蔽，不属于 SSH 白名单。"
   for set_name in "$IPSET_CN4" "$IPSET_CN6" "$IPSET_CF4" "$IPSET_CF6"; do
     if ipset list "$set_name" >/dev/null 2>&1; then
-      printf '%s entries: ' "$set_name"
+      printf '%s 条目数：' "$set_name"
       ipset list "$set_name" | awk -F': ' '/Number of entries/ {print $2}'
     else
-      echo "$set_name: missing"
+      echo "$set_name：缺失"
     fi
   done
   echo
 
-  echo "== Current Iptables Hooks =="
+  echo "== 当前 iptables 挂接规则 =="
   iptables -S INPUT 2>/dev/null | grep -E "$CHAIN_V4|$CHAIN_ICMP_V4|ESTABLISHED" || true
   ip6tables -S INPUT 2>/dev/null | grep -E "$CHAIN_V6|$CHAIN_ICMP_V6|ESTABLISHED" || true
   echo
-
-  echo "== Persistent Rule Test =="
-  if [[ -s "$PERSIST_DIR/rules.v4" ]]; then
-    iptables-restore --test < "$PERSIST_DIR/rules.v4" && echo "IPv4 rules.v4 test: OK" || echo "IPv4 rules.v4 test: FAILED"
-  else
-    echo "IPv4 rules.v4: missing or empty"
-  fi
-  if [[ -s "$PERSIST_DIR/rules.v6" ]]; then
-    ip6tables-restore --test < "$PERSIST_DIR/rules.v6" && echo "IPv6 rules.v6 test: OK" || echo "IPv6 rules.v6 test: FAILED"
-  else
-    echo "IPv6 rules.v6: missing or empty"
+  echo "== 当前 SSH 白名单链 =="
+  iptables -S "$CHAIN_V4" 2>/dev/null || echo "IPv4 SSH 白名单链缺失"
+  if [[ "$ENABLE_IPV6" == "1" ]]; then
+    ip6tables -S "$CHAIN_V6" 2>/dev/null || echo "IPv6 SSH 白名单链缺失"
   fi
   echo
 
-  echo "== Boot Logs =="
+  echo "== 持久化规则测试 =="
+  if [[ -s "$PERSIST_DIR/rules.v4" ]]; then
+    iptables-restore --test < "$PERSIST_DIR/rules.v4" && echo "IPv4 rules.v4 测试：通过" || echo "IPv4 rules.v4 测试：失败"
+  else
+    echo "IPv4 rules.v4：缺失或为空"
+  fi
+  if [[ -s "$PERSIST_DIR/rules.v6" ]]; then
+    ip6tables-restore --test < "$PERSIST_DIR/rules.v6" && echo "IPv6 rules.v6 测试：通过" || echo "IPv6 rules.v6 测试：失败"
+  else
+    echo "IPv6 rules.v6：缺失或为空"
+  fi
+  echo
+
+  echo "== 本次启动日志 =="
   journalctl -b --no-pager -u fwguard-ipset-restore.service -u netfilter-persistent.service -u fwguard-ipset-refresh.timer -u fwguard-ipset-refresh.service || true
 }
 
@@ -577,29 +738,34 @@ print_summary() {
   [[ -s "$STATE_DIR/cf-v6.clean" ]] && cf6="$(wc -l < "$STATE_DIR/cf-v6.clean" | tr -d ' ')"
 
   cat <<EOF
-Applied and persisted firewall rules.
+防火墙规则已应用并完成持久化。
 
-Backup directory: $BACKUP_DIR
-Persistent files:
+备份目录：$BACKUP_DIR
+持久化文件：
   $IPSET_PERSIST_FILE
   $PERSIST_DIR/rules.v4
   $PERSIST_DIR/rules.v6
-Systemd timer:
+systemd 定时器：
   fwguard-ipset-refresh.timer
 
-China IPv4 CIDRs: $cn4
-China IPv6 CIDRs: $cn6
-Cloudflare IPv4 CIDRs: $cf4
-Cloudflare IPv6 CIDRs: $cf6
-SSH port: $SSH_PORT
+中国 IPv4 地址段：$cn4
+中国 IPv6 地址段：$cn6
+Cloudflare ASN IPv4 前缀：$cf4
+Cloudflare ASN IPv6 前缀：$cf6
+Cloudflare ASN：$CLOUDFLARE_ASNS
+SSH 端口：$SSH_PORT
+SSH 白名单：仅 Cloudflare 全部 ASN 当前宣告前缀
+EOF
 
-IMPORTANT:
-  A rollback guard is active for ${ROLLBACK_SECONDS} seconds.
-  If SSH/network is OK and you want to keep these rules, run:
+  cat <<EOF
+
+重要提示：
+  回滚保护将在 ${ROLLBACK_SECONDS} 秒内保持有效。
+  确认 SSH 和网络正常后，请运行以下命令保留新规则：
 
     sudo $INSTALL_PATH confirm
 
-  To manually rollback now, run:
+  如需立即手动回滚，请运行：
 
     sudo $INSTALL_PATH rollback
 EOF
@@ -610,13 +776,16 @@ apply_rules() {
   apt_install_missing
   validate_deps
   prompt_ssh_port
+  normalize_cloudflare_asns
   backup_rules
   start_rollback_guard
-  trap 'echo "ERROR: apply failed; rolling back." >&2; [[ "$DRY_RUN" == "1" ]] || bash "$ROLLBACK_SCRIPT"; exit 1' ERR
+  trap 'echo "错误：应用规则失败，正在回滚。" >&2; [[ "$DRY_RUN" == "1" ]] || bash "$ROLLBACK_SCRIPT"; exit 1' ERR
+  migrate_legacy_state
   download_lists
   load_ipsets
   apply_ipv4_rules
   apply_ipv6_rules
+  remove_legacy_country_whitelists
   connectivity_check
   write_config
   persist_rules
@@ -628,13 +797,21 @@ apply_rules() {
 
 usage() {
   cat <<EOF
-Usage: $0 [apply|confirm|rollback|refresh|diagnose]
+用法：$0 [apply|confirm|rollback|refresh|diagnose]
 
-Environment:
-  SSH_PORT=2222              Skip interactive SSH port prompt
-  ROLLBACK_SECONDS=300       Roll back if not confirmed in this many seconds
-  ENABLE_IPV6=0              Disable IPv6 rules
-  DRY_RUN=1                  Print commands where possible
+命令：
+  apply       交互式应用并持久化规则（默认命令）
+  confirm     确认保留新规则，取消自动回滚
+  rollback    使用最近一次备份立即回滚
+  refresh     更新 IP 地址段并重新持久化规则
+  diagnose    输出重启和持久化诊断信息（也可使用 diag）
+
+环境变量：
+  SSH_PORT=2222                    跳过 SSH 端口交互输入
+  CLOUDFLARE_ASNS="AS13335 ..."    覆盖 Cloudflare ASN 清单
+  ROLLBACK_SECONDS=300             未确认时等待多少秒后回滚
+  ENABLE_IPV6=0                    禁用 IPv6 规则
+  DRY_RUN=1                        尽可能只显示将执行的命令
 EOF
 }
 
