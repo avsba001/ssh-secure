@@ -32,6 +32,7 @@ CONFIRM_FILE="$WORKDIR/confirm-keep-rules"
 BACKUP_DIR="$WORKDIR/backup-$(date +%Y%m%d-%H%M%S)"
 ROLLBACK_SCRIPT="$BACKUP_DIR/rollback.sh"
 LOG_FILE="$BACKUP_DIR/run.log"
+CURRENT_STAGE="初始化"
 
 IPSET_CN4="fwguard_cn_ipv4"
 IPSET_CN6="fwguard_cn_ipv6"
@@ -59,6 +60,62 @@ run() {
   else
     "$@"
   fi
+}
+
+set_stage() {
+  CURRENT_STAGE="$1"
+  echo "当前阶段：$CURRENT_STAGE"
+}
+
+handle_apply_error() {
+  local exit_code="${1:-1}"
+  local line_number="${2:-未知}"
+  local failed_command="${3:-未知}"
+  local function_name="${4:-main}"
+
+  trap - ERR
+  set +e
+  {
+    echo "错误：应用规则失败。"
+    echo "失败阶段：$CURRENT_STAGE"
+    echo "失败位置：函数 $function_name，第 $line_number 行"
+    echo "失败命令：$failed_command"
+    echo "退出码：$exit_code"
+    echo "诊断日志：$LOG_FILE"
+    if command -v ipset >/dev/null 2>&1; then
+      echo "失败时的 fwguard ipset 集合："
+      ipset list -name 2>/dev/null | grep '^fwguard_' || echo "  未发现 fwguard ipset 集合"
+    fi
+    echo "正在回滚……"
+  } 2>&1 | tee -a "$LOG_FILE" >&2
+
+  if [[ "$DRY_RUN" != "1" ]]; then
+    bash "$ROLLBACK_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
+  fi
+  echo "可运行以下命令查看完整诊断：" >&2
+  printf '  sudo bash %q diagnose\n' "${BASH_SOURCE[0]}" >&2
+  exit "$exit_code"
+}
+
+handle_refresh_error() {
+  local exit_code="${1:-1}"
+  local line_number="${2:-未知}"
+  local failed_command="${3:-未知}"
+  local function_name="${4:-main}"
+  local refresh_log="$STATE_DIR/last-refresh-error.log"
+
+  trap - ERR
+  set +e
+  mkdir -p "$STATE_DIR"
+  {
+    echo "时间：$(date '+%F %T %z')"
+    echo "错误：定时更新失败。"
+    echo "失败阶段：$CURRENT_STAGE"
+    echo "失败位置：函数 $function_name，第 $line_number 行"
+    echo "失败命令：$failed_command"
+    echo "退出码：$exit_code"
+  } 2>&1 | tee "$refresh_log" >&2
+  exit "$exit_code"
 }
 
 apt_install_missing() {
@@ -378,24 +435,52 @@ load_one_set() {
   local family="$2"
   local list_file="$3"
   local tmp_set="${set_name}_tmp"
+  local create_line=""
 
+  CURRENT_STAGE="准备 ipset 集合 $set_name"
+  echo "正在载入 ipset 集合：$set_name"
   if ipset list "$tmp_set" >/dev/null 2>&1; then
-    run ipset flush "$tmp_set"
+    run ipset destroy "$tmp_set"
+  fi
+  if ipset list "$set_name" >/dev/null 2>&1; then
+    create_line="$(ipset save "$set_name" 2>/dev/null | sed -n '1p')"
+    if [[ "$create_line" != "create $set_name hash:net "* ]]; then
+      echo "错误：现有集合 $set_name 不是兼容的 hash:net 类型。" >&2
+      ipset list "$set_name" 2>/dev/null | sed -n '1,/^Number of entries:/p' >&2 || true
+      return 1
+    fi
+    create_line="${create_line/create $set_name /create $tmp_set }"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      echo "[演练模式] $create_line"
+    elif ! printf '%s\n' "$create_line" | ipset restore; then
+      echo "错误：无法按现有集合参数创建临时集合 $tmp_set。" >&2
+      return 1
+    fi
   else
     run ipset create "$tmp_set" hash:net family "$family" hashsize 65536 maxelem 1048576
   fi
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "[演练模式] 将从 $list_file 批量载入集合 $tmp_set。"
   else
-    while IFS= read -r cidr; do
+    if ! while IFS= read -r cidr; do
       [[ -n "$cidr" ]] && printf 'add %s %s -exist\n' "$tmp_set" "$cidr"
-    done < "$list_file" | ipset restore
+    done < "$list_file" | ipset restore; then
+      echo "错误：向临时集合 $tmp_set 批量载入 $list_file 失败。" >&2
+      ipset list "$tmp_set" 2>/dev/null | sed -n '1,/^Number of entries:/p' >&2 || true
+      return 1
+    fi
   fi
 
   if ! ipset list "$set_name" >/dev/null 2>&1; then
     run ipset create "$set_name" hash:net family "$family" hashsize 65536 maxelem 1048576
   fi
-  run ipset swap "$tmp_set" "$set_name"
+  CURRENT_STAGE="原子替换 ipset 集合 $set_name"
+  if ! run ipset swap "$tmp_set" "$set_name"; then
+    echo "错误：ipset 集合 $tmp_set 与 $set_name 无法交换，详细参数如下：" >&2
+    ipset list "$tmp_set" 2>/dev/null | sed -n '1,/^Number of entries:/p' >&2 || true
+    ipset list "$set_name" 2>/dev/null | sed -n '1,/^Number of entries:/p' >&2 || true
+    return 1
+  fi
   run ipset destroy "$tmp_set"
 }
 
@@ -660,19 +745,31 @@ load_config_if_present() {
 
 refresh_ipsets() {
   need_root
+  trap 'handle_refresh_error "$?" "$LINENO" "$BASH_COMMAND" "${FUNCNAME[0]:-main}"' ERR
+  set_stage "检查并安装依赖"
   apt_install_missing
   validate_deps
+  set_stage "读取已保存配置"
   load_config_if_present
   validate_ssh_port "${SSH_PORT:-22}"
   SSH_PORT="${SSH_PORT:-22}"
+  set_stage "迁移旧版持久化文件"
   migrate_legacy_state
+  set_stage "下载 ASN 和 IP 前缀数据"
   download_lists
+  set_stage "载入 ipset 集合"
   load_ipsets
+  set_stage "应用 IPv4 防火墙规则"
   apply_ipv4_rules
+  set_stage "应用 IPv6 防火墙规则"
   apply_ipv6_rules
+  set_stage "清理旧版国家白名单"
   remove_legacy_country_whitelists
+  set_stage "写入配置和持久化规则"
   write_config
   persist_rules
+  trap - ERR
+  rm -f "$STATE_DIR/last-refresh-error.log"
   echo "Cloudflare ASN 前缀和中国 ICMP 地址段已更新，防火墙规则已重新持久化。"
 }
 
@@ -697,7 +794,7 @@ rollback_latest() {
 }
 
 diagnose_rules() {
-  local set_name
+  local set_name latest_backup latest_log data_file
   need_root
   load_config_if_present
 
@@ -751,6 +848,28 @@ diagnose_rules() {
   done
   echo
 
+  echo "== ipset 详细参数 =="
+  while IFS= read -r set_name; do
+    [[ -n "$set_name" ]] || continue
+    echo "-- $set_name --"
+    ipset list "$set_name" 2>/dev/null | sed -n '1,/^Number of entries:/p' || true
+  done < <(ipset list -name 2>/dev/null | grep '^fwguard_' || true)
+  echo
+
+  echo "== 下载数据状态 =="
+  for data_file in "$STATE_DIR/cn-v4.clean" "$STATE_DIR/cn-v6.clean" "$STATE_DIR/cf-v4.clean" "$STATE_DIR/cf-v6.clean"; do
+    if [[ -s "$data_file" ]]; then
+      printf '%s：%s 行\n' "$data_file" "$(wc -l < "$data_file" | tr -d ' ')"
+    else
+      echo "${data_file}：缺失或为空"
+    fi
+  done
+  if [[ -s "$STATE_DIR/cloudflare-asns.json" ]]; then
+    printf 'ASN 搜索接口状态：'
+    jq -r '.status // "未知"' "$STATE_DIR/cloudflare-asns.json" 2>/dev/null || echo "JSON 解析失败"
+  fi
+  echo
+
   echo "== 当前 iptables 挂接规则 =="
   iptables -S INPUT 2>/dev/null | grep -E "$CHAIN_V4|$CHAIN_ICMP_V4|ESTABLISHED" || true
   ip6tables -S INPUT 2>/dev/null | grep -E "$CHAIN_V6|$CHAIN_ICMP_V6|ESTABLISHED" || true
@@ -777,6 +896,28 @@ diagnose_rules() {
 
   echo "== 本次启动日志 =="
   journalctl -b --no-pager -u fwguard-ipset-restore.service -u netfilter-persistent.service -u fwguard-ipset-refresh.timer -u fwguard-ipset-refresh.service || true
+  echo
+
+  echo "== 最近一次应用日志 =="
+  latest_backup="$(ls -dt "$WORKDIR"/backup-* 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$latest_backup" ]]; then
+    echo "最近备份目录：$latest_backup"
+    latest_log="$latest_backup/run.log"
+    if [[ -s "$latest_log" ]]; then
+      tail -n 100 "$latest_log"
+    else
+      echo "最近一次运行日志为空；该备份可能由旧版脚本创建。"
+    fi
+  else
+    echo "未找到应用备份目录。"
+  fi
+  echo
+  echo "== 最近一次定时更新错误 =="
+  if [[ -s "$STATE_DIR/last-refresh-error.log" ]]; then
+    cat "$STATE_DIR/last-refresh-error.log"
+  else
+    echo "未记录定时更新错误。"
+  fi
 }
 
 print_summary() {
@@ -825,25 +966,38 @@ EOF
 
 apply_rules() {
   need_root
+  set_stage "检查并安装依赖"
   apt_install_missing
   validate_deps
+  set_stage "读取 SSH 端口"
   prompt_ssh_port
   normalize_cloudflare_asns
+  set_stage "备份当前防火墙规则"
   backup_rules
   start_rollback_guard
-  trap 'echo "错误：应用规则失败，正在回滚。" >&2; [[ "$DRY_RUN" == "1" ]] || bash "$ROLLBACK_SCRIPT"; exit 1' ERR
+  trap 'handle_apply_error "$?" "$LINENO" "$BASH_COMMAND" "${FUNCNAME[0]:-main}"' ERR
+  set_stage "迁移旧版持久化文件"
   migrate_legacy_state
+  set_stage "下载 ASN 和 IP 前缀数据"
   download_lists
+  set_stage "载入 ipset 集合"
   load_ipsets
+  set_stage "应用 IPv4 防火墙规则"
   apply_ipv4_rules
+  set_stage "应用 IPv6 防火墙规则"
   apply_ipv6_rules
+  set_stage "清理旧版国家白名单"
   remove_legacy_country_whitelists
+  set_stage "检查网络连通性"
   connectivity_check
+  set_stage "写入配置和持久化规则"
   write_config
   persist_rules
+  set_stage "安装脚本和 systemd 定时任务"
   install_self
   install_systemd_units
   trap - ERR
+  set_stage "完成"
   print_summary
 }
 
