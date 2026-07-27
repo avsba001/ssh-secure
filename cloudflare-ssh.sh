@@ -234,37 +234,40 @@ validate_ssh_port() {
 
 province_code() {
   case "$1" in
-    anhui|安徽) echo "anhui" ;;
-    beijing|北京) echo "beijing" ;;
-    chongqing|重庆|重慶) echo "chongqing" ;;
-    fujian|福建) echo "fujian" ;;
-    gansu|甘肃|甘肅) echo "gansu" ;;
-    guangdong|广东|廣東) echo "guangdong" ;;
-    guangxi|广西|廣西) echo "guangxi" ;;
-    guizhou|贵州|貴州) echo "guizhou" ;;
-    hainan|海南) echo "hainan" ;;
-    hebei|河北) echo "hebei" ;;
-    heilongjiang|黑龙江|黑龍江) echo "heilongjiang" ;;
-    henan|河南) echo "henan" ;;
-    hubei|湖北) echo "hubei" ;;
-    hunan|湖南) echo "hunan" ;;
-    jiangsu|江苏|江蘇) echo "jiangsu" ;;
-    jiangxi|江西) echo "jiangxi" ;;
-    jilin|吉林) echo "jilin" ;;
-    liaoning|辽宁|遼寧) echo "liaoning" ;;
-    neimenggu|内蒙古|內蒙古) echo "neimenggu" ;;
-    ningxia|宁夏|寧夏) echo "ningxia" ;;
-    qinghai|青海) echo "qinghai" ;;
-    shaanxi|陕西|陝西) echo "shaanxi" ;;
-    shandong|山东|山東) echo "shandong" ;;
-    shanghai|上海) echo "shanghai" ;;
-    shanxi|山西) echo "shanxi" ;;
-    sichuan|四川) echo "sichuan" ;;
-    tianjin|天津) echo "tianjin" ;;
-    xinjiang|新疆) echo "xinjiang" ;;
-    xizang|西藏) echo "xizang" ;;
-    yunnan|云南|雲南) echo "yunnan" ;;
-    zhejiang|浙江) echo "zhejiang" ;;
+    110000|beijing|北京) echo "110000" ;;
+    120000|tianjin|天津) echo "120000" ;;
+    130000|hebei|河北) echo "130000" ;;
+    140000|shanxi|山西) echo "140000" ;;
+    150000|neimenggu|内蒙古|內蒙古) echo "150000" ;;
+    210000|liaoning|辽宁|遼寧) echo "210000" ;;
+    220000|jilin|吉林) echo "220000" ;;
+    230000|heilongjiang|黑龙江|黑龍江) echo "230000" ;;
+    310000|shanghai|上海) echo "310000" ;;
+    320000|jiangsu|江苏|江蘇) echo "320000" ;;
+    330000|zhejiang|浙江) echo "330000" ;;
+    340000|anhui|安徽) echo "340000" ;;
+    350000|fujian|福建) echo "350000" ;;
+    360000|jiangxi|江西) echo "360000" ;;
+    370000|shandong|山东|山東) echo "370000" ;;
+    410000|henan|河南) echo "410000" ;;
+    420000|hubei|湖北) echo "420000" ;;
+    430000|hunan|湖南) echo "430000" ;;
+    440000|guangdong|广东|廣東) echo "440000" ;;
+    450000|guangxi|广西|廣西) echo "450000" ;;
+    460000|hainan|海南) echo "460000" ;;
+    500000|chongqing|重庆|重慶) echo "500000" ;;
+    510000|sichuan|四川) echo "510000" ;;
+    520000|guizhou|贵州|貴州) echo "520000" ;;
+    530000|yunnan|云南|雲南) echo "530000" ;;
+    540000|xizang|西藏) echo "540000" ;;
+    610000|shaanxi|陕西|陝西) echo "610000" ;;
+    620000|gansu|甘肃|甘肅) echo "620000" ;;
+    630000|qinghai|青海) echo "630000" ;;
+    640000|ningxia|宁夏|寧夏) echo "640000" ;;
+    650000|xinjiang|新疆) echo "650000" ;;
+    710000|taiwan|台湾|台灣) echo "710000" ;;
+    810000|hongkong|xianggang|香港) echo "810000" ;;
+    820000|macau|macao|aomen|澳门|澳門) echo "820000" ;;
     *) return 1 ;;
   esac
 }
@@ -330,7 +333,7 @@ prompt_ssh_cn_whitelist() {
     3)
       SSH_CN_WHITELIST_MODE="province"
       echo "可输入中文省份或拼音代码，多个用空格或逗号分隔。"
-      echo "示例：guangdong shanghai 或 广东,上海"
+      echo "示例：hubei shanghai 或 湖北,上海"
       read -rp "请输入省份: " provinces
       SSH_CN_PROVINCES="$provinces"
       normalize_ssh_cn_provinces
@@ -1260,7 +1263,7 @@ usage() {
 环境变量：
   SSH_PORT=2222                    跳过 SSH 端口交互输入
   SSH_CN_WHITELIST_MODE=none       SSH 中国白名单模式：none/all/province
-  SSH_CN_PROVINCES="guangdong ..." 省份模式使用，支持中文或拼音代码
+  SSH_CN_PROVINCES="hubei ..."     省份模式使用，支持中文、拼音或 6 位行政区划代码
   CLOUDFLARE_ASNS="AS13335 ..."    配合关闭自动发现，覆盖 ASN 清单
   CLOUDFLARE_ASN_AUTO_UPDATE=0      关闭 ASN 自动发现，固定使用配置清单
   ROLLBACK_SECONDS=300             未确认时等待多少秒后回滚
