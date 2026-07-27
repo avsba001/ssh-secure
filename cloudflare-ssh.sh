@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -Eeuo pipefail
 
 # Debian 12 防火墙保护脚本：
@@ -17,7 +17,6 @@ DRY_RUN="${DRY_RUN:-0}"
 CN_URL="${CN_URL:-https://www.ipdeny.com/ipblocks/data/countries/cn.zone}"
 CN_IPV6_URL="${CN_IPV6_URL:-https://www.ipdeny.com/ipv6/ipaddresses/blocks/cn.zone}"
 CN_PROVINCE_URL_TEMPLATE="${CN_PROVINCE_URL_TEMPLATE:-https://metowolf.github.io/iplist/data/cncity/%s.txt}"
-CN_PROVINCE_FALLBACK_URL_TEMPLATE="${CN_PROVINCE_FALLBACK_URL_TEMPLATE:-https://metowolf.github.io/iplist/data/country/CN/CN-%s.txt}"
 SSH_CN_WHITELIST_MODE="${SSH_CN_WHITELIST_MODE:-}"
 SSH_CN_PROVINCES="${SSH_CN_PROVINCES:-}"
 # Cloudflare 当前已识别的 ASN。可通过同名环境变量显式覆盖。
@@ -212,75 +211,6 @@ validate_deps() {
   fi
 }
 
-iptables_backend() {
-  local version
-  version="$(iptables -V 2>/dev/null || true)"
-  if grep -qi 'nf_tables' <<< "$version"; then
-    echo "nft"
-  elif [[ -n "$version" ]]; then
-    echo "iptables"
-  else
-    echo "unknown"
-  fi
-}
-
-switch_to_iptables_legacy() {
-  local alt legacy
-
-  if ! command -v update-alternatives >/dev/null 2>&1; then
-    echo "错误：缺少 update-alternatives，无法自动切换到 iptables-legacy。" >&2
-    exit 1
-  fi
-
-  for alt in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do
-    legacy="/usr/sbin/${alt}-legacy"
-    if [[ -x "$legacy" ]]; then
-      update-alternatives --set "$alt" "$legacy"
-    fi
-  done
-
-  systemctl disable --now nftables >/dev/null 2>&1 || true
-}
-
-ensure_iptables_firewall_backend() {
-  local mode="${1:-interactive}"
-  local backend choice
-
-  backend="$(iptables_backend)"
-  echo "当前 iptables 后端：$backend ($(iptables -V 2>/dev/null || echo unknown))"
-  case "$backend" in
-    iptables)
-      return 0
-      ;;
-    nft)
-      if [[ "$mode" != "interactive" ]]; then
-        echo "错误：当前使用 nft 后端，定时刷新不会自动交互切换。请手动运行 apply 并选择切换到 iptables-legacy。" >&2
-        exit 1
-      fi
-      read -rp "检测到当前使用 nft 后端。是否切换到 iptables-legacy 并禁用 nftables 服务？(y=是 / n=停止) [默认: y]: " choice
-      case "${choice:-y}" in
-        [Yy])
-          switch_to_iptables_legacy
-          backend="$(iptables_backend)"
-          if [[ "$backend" != "iptables" ]]; then
-            echo "错误：切换后仍未使用 iptables-legacy，请手动检查 update-alternatives。" >&2
-            exit 1
-          fi
-          echo "已切换到 iptables-legacy，并已尝试禁用 nftables 服务。"
-          ;;
-        *)
-          echo "已停止。请先切换到 iptables-legacy，避免 nft 规则绕过 SSH 白名单。" >&2
-          exit 1
-          ;;
-      esac
-      ;;
-    *)
-      echo "错误：无法识别当前 iptables 后端。" >&2
-      exit 1
-      ;;
-  esac
-}
-
 prompt_ssh_port() {
   local input
 
@@ -303,7 +233,7 @@ validate_ssh_port() {
 }
 
 province_code() {
-  case "$1" in
+  case "${1,,}" in
     110000|beijing|北京) echo "110000" ;;
     120000|tianjin|天津) echo "120000" ;;
     130000|hebei|河北) echo "130000" ;;
@@ -342,46 +272,6 @@ province_code() {
   esac
 }
 
-province_iso() {
-  case "$1" in
-    110000|beijing|北京) echo "BJ" ;;
-    120000|tianjin|天津) echo "TJ" ;;
-    130000|hebei|河北) echo "HE" ;;
-    140000|shanxi|山西) echo "SX" ;;
-    150000|neimenggu|内蒙古|內蒙古) echo "NM" ;;
-    210000|liaoning|辽宁|遼寧) echo "LN" ;;
-    220000|jilin|吉林) echo "JL" ;;
-    230000|heilongjiang|黑龙江|黑龍江) echo "HL" ;;
-    310000|shanghai|上海) echo "SH" ;;
-    320000|jiangsu|江苏|江蘇) echo "JS" ;;
-    330000|zhejiang|浙江) echo "ZJ" ;;
-    340000|anhui|安徽) echo "AH" ;;
-    350000|fujian|福建) echo "FJ" ;;
-    360000|jiangxi|江西) echo "JX" ;;
-    370000|shandong|山东|山東) echo "SD" ;;
-    410000|henan|河南) echo "HA" ;;
-    420000|hubei|湖北) echo "HB" ;;
-    430000|hunan|湖南) echo "HN" ;;
-    440000|guangdong|广东|廣東) echo "GD" ;;
-    450000|guangxi|广西|廣西) echo "GX" ;;
-    460000|hainan|海南) echo "HI" ;;
-    500000|chongqing|重庆|重慶) echo "CQ" ;;
-    510000|sichuan|四川) echo "SC" ;;
-    520000|guizhou|贵州|貴州) echo "GZ" ;;
-    530000|yunnan|云南|雲南) echo "YN" ;;
-    540000|xizang|西藏) echo "XZ" ;;
-    610000|shaanxi|陕西|陝西) echo "SN" ;;
-    620000|gansu|甘肃|甘肅) echo "GS" ;;
-    630000|qinghai|青海) echo "QH" ;;
-    640000|ningxia|宁夏|寧夏) echo "NX" ;;
-    650000|xinjiang|新疆) echo "XJ" ;;
-    710000|taiwan|台湾|台灣) echo "TW" ;;
-    810000|hongkong|xianggang|香港) echo "HK" ;;
-    820000|macau|macao|aomen|澳门|澳門) echo "MO" ;;
-    *) return 1 ;;
-  esac
-}
-
 normalize_ssh_cn_whitelist_mode() {
   SSH_CN_WHITELIST_MODE="${SSH_CN_WHITELIST_MODE,,}"
   case "$SSH_CN_WHITELIST_MODE" in
@@ -395,10 +285,6 @@ normalize_ssh_cn_whitelist_mode() {
     echo "错误：CN_PROVINCE_URL_TEMPLATE 必须包含 %s 作为省份代码占位符。" >&2
     exit 1
   fi
-  if [[ "$SSH_CN_WHITELIST_MODE" == "province" && "$CN_PROVINCE_FALLBACK_URL_TEMPLATE" != *"%s"* ]]; then
-    echo "错误：CN_PROVINCE_FALLBACK_URL_TEMPLATE 必须包含 %s 作为省份代码占位符。" >&2
-    exit 1
-  fi
 }
 
 normalize_ssh_cn_provinces() {
@@ -406,7 +292,7 @@ normalize_ssh_cn_provinces() {
 
   raw="${SSH_CN_PROVINCES//,/ }"
   for token in $raw; do
-    code="$(province_code "${token,,}")" || {
+    code="$(province_code "$token")" || {
       echo "错误：不支持的省份名称或代码：$token" >&2
       exit 1
     }
@@ -446,7 +332,7 @@ prompt_ssh_cn_whitelist() {
       ;;
     3)
       SSH_CN_WHITELIST_MODE="province"
-      echo "可输入中文省份或拼音代码，多个用空格或逗号分隔。"
+      echo "可输入中文省份、拼音或 6 位行政区划代码，多个用空格或逗号分隔。"
       echo "示例：hubei shanghai 或 湖北,上海"
       read -rp "请输入省份: " provinces
       SSH_CN_PROVINCES="$provinces"
@@ -650,7 +536,7 @@ download_cloudflare_asn_lists() {
 }
 
 download_ssh_cn_whitelist_lists() {
-  local tmp4 province iso primary_url fallback_url province_file
+  local tmp4 province url province_file
 
   rm -f "$STATE_DIR/ssh-cn-v4.clean" "$STATE_DIR/ssh-cn-v6.clean"
   case "$SSH_CN_WHITELIST_MODE" in
@@ -661,11 +547,7 @@ download_ssh_cn_whitelist_lists() {
     all)
       echo "正在生成 SSH 中国全量 IP 白名单……"
       cp -a "$STATE_DIR/cn-v4.clean" "$STATE_DIR/ssh-cn-v4.clean"
-      if [[ ! -s "$STATE_DIR/ssh-cn-v4.clean" ]]; then
-        echo "错误：SSH 中国 IPv4 白名单为空。" >&2
-        exit 1
-      fi
-      if [[ "$ENABLE_IPV6" == "1" ]]; then
+      if [[ "$ENABLE_IPV6" == "1" && -s "$STATE_DIR/cn-v6.clean" ]]; then
         cp -a "$STATE_DIR/cn-v6.clean" "$STATE_DIR/ssh-cn-v6.clean"
       fi
       ;;
@@ -673,20 +555,11 @@ download_ssh_cn_whitelist_lists() {
       echo "正在生成 SSH 中国省份 IP 白名单：$SSH_CN_PROVINCES"
       tmp4="$(mktemp "$STATE_DIR/ssh-cn-v4.clean.XXXXXX")"
       for province in $SSH_CN_PROVINCES; do
-        iso="$(province_iso "$province")" || {
-          rm -f "$tmp4"
-          echo "错误：无法识别省份代码：$province" >&2
-          exit 1
-        }
-        primary_url="${CN_PROVINCE_URL_TEMPLATE//%s/$province}"
-        fallback_url="${CN_PROVINCE_FALLBACK_URL_TEMPLATE//%s/$iso}"
+        url="${CN_PROVINCE_URL_TEMPLATE//%s/$province}"
         province_file="$STATE_DIR/ssh-cn-${province}.zone"
         echo "正在下载省份 IPv4 地址段：$province"
-        echo "尝试数据源：$primary_url"
-        if ! fetch "$primary_url" "$province_file"; then
-          echo "主数据源不可用，尝试备用源：$fallback_url"
-          fetch "$fallback_url" "$province_file"
-        fi
+        echo "数据源：$url"
+        fetch "$url" "$province_file"
         grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' "$province_file" >> "$tmp4" || true
       done
       sort -u -o "$tmp4" "$tmp4"
@@ -969,13 +842,12 @@ SSH_PORT="$SSH_PORT"
 ROLLBACK_SECONDS="$ROLLBACK_SECONDS"
 ALLOW_ESTABLISHED="$ALLOW_ESTABLISHED"
 ENABLE_IPV6="$ENABLE_IPV6"
-CN_URL="$CN_URL"
-CN_IPV6_URL="$CN_IPV6_URL"
-CN_PROVINCE_URL_TEMPLATE="$CN_PROVINCE_URL_TEMPLATE"
-CN_PROVINCE_FALLBACK_URL_TEMPLATE="$CN_PROVINCE_FALLBACK_URL_TEMPLATE"
-SSH_CN_WHITELIST_MODE="$SSH_CN_WHITELIST_MODE"
-SSH_CN_PROVINCES="$SSH_CN_PROVINCES"
-CLOUDFLARE_ASNS="$CLOUDFLARE_ASNS"
+  CN_URL="$CN_URL"
+  CN_IPV6_URL="$CN_IPV6_URL"
+  CN_PROVINCE_URL_TEMPLATE="$CN_PROVINCE_URL_TEMPLATE"
+  SSH_CN_WHITELIST_MODE="$SSH_CN_WHITELIST_MODE"
+  SSH_CN_PROVINCES="$SSH_CN_PROVINCES"
+  CLOUDFLARE_ASNS="$CLOUDFLARE_ASNS"
 CLOUDFLARE_ASN_AUTO_UPDATE="$CLOUDFLARE_ASN_AUTO_UPDATE"
 RIPESTAT_ASN_SEARCH_URL="$RIPESTAT_ASN_SEARCH_URL"
 RIPESTAT_ANNOUNCED_PREFIXES_URL="$RIPESTAT_ANNOUNCED_PREFIXES_URL"
@@ -1090,7 +962,6 @@ load_config_if_present() {
   RIPESTAT_ASN_SEARCH_URL="${RIPESTAT_ASN_SEARCH_URL:-https://stat.ripe.net/data/searchcomplete/data.json}"
   RIPESTAT_ANNOUNCED_PREFIXES_URL="${RIPESTAT_ANNOUNCED_PREFIXES_URL:-https://stat.ripe.net/data/announced-prefixes/data.json}"
   CN_PROVINCE_URL_TEMPLATE="${CN_PROVINCE_URL_TEMPLATE:-https://metowolf.github.io/iplist/data/cncity/%s.txt}"
-  CN_PROVINCE_FALLBACK_URL_TEMPLATE="${CN_PROVINCE_FALLBACK_URL_TEMPLATE:-https://metowolf.github.io/iplist/data/country/CN/CN-%s.txt}"
   SSH_CN_WHITELIST_MODE="${SSH_CN_WHITELIST_MODE:-none}"
   SSH_CN_PROVINCES="${SSH_CN_PROVINCES:-}"
   normalize_ssh_cn_whitelist_mode
@@ -1107,8 +978,6 @@ refresh_ipsets() {
   set_stage "检查并安装依赖"
   apt_install_missing
   validate_deps
-  set_stage "检查防火墙后端"
-  ensure_iptables_firewall_backend noninteractive
   set_stage "读取已保存配置"
   load_config_if_present
   validate_ssh_port "${SSH_PORT:-22}"
@@ -1343,8 +1212,6 @@ apply_rules() {
   set_stage "检查并安装依赖"
   apt_install_missing
   validate_deps
-  set_stage "检查防火墙后端"
-  ensure_iptables_firewall_backend
   set_stage "读取 SSH 端口"
   prompt_ssh_port
   set_stage "读取 SSH 中国 IP 白名单策略"
@@ -1394,8 +1261,7 @@ usage() {
   SSH_PORT=2222                    跳过 SSH 端口交互输入
   SSH_CN_WHITELIST_MODE=none       SSH 中国白名单模式：none/all/province
   SSH_CN_PROVINCES="hubei ..."     省份模式使用，支持中文、拼音或 6 位行政区划代码
-  CN_PROVINCE_URL_TEMPLATE=...      省份主数据源，使用 %s 代表 6 位行政区划代码
-  CN_PROVINCE_FALLBACK_URL_TEMPLATE=... 省份备用数据源，使用 %s 代表 ISO 省份缩写
+  CN_PROVINCE_URL_TEMPLATE=...      省份数据源，使用 %s 代表 6 位行政区划代码
   CLOUDFLARE_ASNS="AS13335 ..."    配合关闭自动发现，覆盖 ASN 清单
   CLOUDFLARE_ASN_AUTO_UPDATE=0      关闭 ASN 自动发现，固定使用配置清单
   ROLLBACK_SECONDS=300             未确认时等待多少秒后回滚
