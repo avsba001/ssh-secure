@@ -4,7 +4,7 @@ set -e
 ### ===== 基本信息 =====
 SCRIPT_NAME="vps-secure.sh"
 REPO_RAW="https://raw.githubusercontent.com/avsba001/vps-secure/main"
-LOCAL_VERSION="1.0.20"
+LOCAL_VERSION="1.0.21"
 
 ### ===== 防止无限自更新 =====
 if [ "$VPS_SECURE_UPDATED" != "1" ]; then
@@ -217,7 +217,7 @@ run_script_without_backup() {
   echo ">>> $script 执行完成"
 }
 
-VERSION="1.0.20"
+VERSION="1.0.21"
 
 while true; do
   echo
@@ -232,11 +232,12 @@ while true; do
   echo "5) 中国 IP ICMP 屏蔽（ipset + systemd）"
   echo "6) PMTU MSS 自动修正（iptables mangle）"
   echo "7) Cloudflare ASN SSH 白名单（可加中国/省份）+ 中国 ICMP 屏蔽"
-  echo "8) 全部执行"
-  echo "9) 撤销修改（从最近备份恢复）"
+  echo "8) 检查当前 SSH 白名单 IP 段归属"
+  echo "9) 全部执行"
+  echo "10) 撤销修改（从最近备份恢复）"
   echo "0) 退出"
   echo
-  read -rp "请选择要执行的操作 [0-9]: " choice
+  read -rp "请选择要执行的操作 [0-10]: " choice
 
   case "$choice" in
     1)
@@ -262,6 +263,9 @@ while true; do
       run_step 7 "cloudflare-ssh.sh"
       ;;
     8)
+      run_script_without_backup "ssh-whitelist-check.sh"
+      ;;
+    9)
       run_step 1 "sshd-secure-setup.sh"
       run_step 2 "cake.sh"
       run_step 3 "fail2ban.sh"
@@ -271,7 +275,7 @@ while true; do
       run_step 6 "pmtu-mss.sh"
       run_step 7 "cloudflare-ssh.sh"
       ;;
-    9)
+    10)
       rollback_menu
       ;;
     0)

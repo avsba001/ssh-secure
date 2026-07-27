@@ -13,8 +13,9 @@ VPS 安全与网络优化一键工具。`vps-secure.sh` 是主入口脚本，提
 | 5 | `cn-ipset.sh` | 下载中国 IP 段，使用 ipset + iptables 屏蔽来自中国 IP 的 ICMP，并通过 systemd 开机应用。 |
 | 6 | `pmtu-mss.sh` | 设置 iptables/ip6tables mangle 规则，按 MTU 自动计算并固定 TCP MSS，缓解 PMTU 问题。 |
 | 7 | `cloudflare-ssh.sh` | SSH 默认仅允许 Cloudflare ASN 当前宣告的 IP 前缀访问，可选额外加入中国全量或指定省份 IP 白名单，同时屏蔽中国 IP 段 ICMP/ICMPv6，并配置定时更新和回滚保护。 |
-| 8 | 全部脚本 | 按顺序执行上述功能。 |
-| 9 | 主脚本内置 | 从最近备份撤销已支持的修改。 |
+| 8 | `ssh-whitelist-check.sh` | 检查当前生效的 SSH 白名单链和 ipset 集合，显示 Cloudflare ASN、中国全量或中国省份等 IP 段归属。 |
+| 9 | 全部配置脚本 | 按顺序执行配置类功能。 |
+| 10 | 主脚本内置 | 从最近备份撤销已支持的修改。 |
 
 ## 一键运行
 
