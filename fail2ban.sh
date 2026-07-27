@@ -539,7 +539,7 @@ systemctl restart fail2ban
 
 echo "===> fail2ban-client 验证"
 wait_for_fail2ban_ready
-fail2ban-client status ssh
+fail2ban-client status sshd
 fail2ban-client status sshd-aggressive
 verify_network_or_restore
 
