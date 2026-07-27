@@ -4,7 +4,7 @@ set -e
 ### ===== 基本信息 =====
 SCRIPT_NAME="vps-secure.sh"
 REPO_RAW="https://raw.githubusercontent.com/avsba001/vps-secure/main"
-LOCAL_VERSION="1.0.15"
+LOCAL_VERSION="1.0.18"
 
 ### ===== 防止无限自更新 =====
 if [ "$VPS_SECURE_UPDATED" != "1" ]; then
@@ -45,7 +45,7 @@ backup_paths_for_step() {
       echo "/usr/local/bin/set-cake.sh /etc/systemd/system/set-cake.service"
       ;;
     3)
-      echo "/etc/fail2ban/jail.local /etc/fail2ban/filter.d/sshd-disconnect.conf"
+      echo "/etc/fail2ban/jail.local /etc/fail2ban/filter.d/sshd-disconnect.conf /etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled"
       ;;
     5)
       echo "/usr/local/bin/update-cn-ipset.sh /etc/systemd/system/cn-ipset.service"
@@ -115,6 +115,8 @@ restore_from_backup() {
     3)
       [ -f "$dir/etc/fail2ban/jail.local" ] && cp -a "$dir/etc/fail2ban/jail.local" /etc/fail2ban/jail.local
       [ -f "$dir/etc/fail2ban/filter.d/sshd-disconnect.conf" ] && cp -a "$dir/etc/fail2ban/filter.d/sshd-disconnect.conf" /etc/fail2ban/filter.d/sshd-disconnect.conf
+      rm -f /etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled
+      [ -f "$dir/etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled" ] && cp -a "$dir/etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled" /etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled
       systemctl restart fail2ban >/dev/null 2>&1 || true
       ;;
     5)
@@ -215,7 +217,7 @@ run_script_without_backup() {
   echo ">>> $script 执行完成"
 }
 
-VERSION="1.0.15"
+VERSION="1.0.18"
 
 while true; do
   echo
@@ -229,7 +231,7 @@ while true; do
   echo "4) XanMod Cloud 精简内核安装"
   echo "5) 中国 IP ICMP 屏蔽（ipset + systemd）"
   echo "6) PMTU MSS 自动修正（iptables mangle）"
-  echo "7) Cloudflare ASN SSH 白名单 + 中国 ICMP 屏蔽"
+  echo "7) Cloudflare ASN SSH 白名单（可加中国/省份）+ 中国 ICMP 屏蔽"
   echo "8) 全部执行"
   echo "9) 撤销修改（从最近备份恢复）"
   echo "0) 退出"

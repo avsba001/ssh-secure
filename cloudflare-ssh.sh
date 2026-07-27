@@ -4,8 +4,9 @@ set -Eeuo pipefail
 # Debian 12 防火墙保护脚本：
 # 1. 屏蔽来自中国 IP 段的 ICMP/ICMPv6。
 # 2. SSH 仅允许 Cloudflare 全部 ASN 当前宣告的 IP 前缀访问。
-# 3. 使用 ipset 提升匹配性能。
-# 4. 持久化规则、定时更新 IP 段，并在异常时自动回滚。
+# 3. 可选允许中国全量或指定省份 IP 访问 SSH。
+# 4. 使用 ipset 提升匹配性能。
+# 5. 持久化规则、定时更新 IP 段，并在异常时自动回滚。
 
 SSH_PORT="${SSH_PORT:-}"
 ROLLBACK_SECONDS="${ROLLBACK_SECONDS:-180}"
@@ -15,6 +16,9 @@ DRY_RUN="${DRY_RUN:-0}"
 
 CN_URL="${CN_URL:-https://www.ipdeny.com/ipblocks/data/countries/cn.zone}"
 CN_IPV6_URL="${CN_IPV6_URL:-https://www.ipdeny.com/ipv6/ipaddresses/blocks/cn.zone}"
+CN_PROVINCE_URL_TEMPLATE="${CN_PROVINCE_URL_TEMPLATE:-https://metowolf.github.io/iplist/data/cncity/%s.txt}"
+SSH_CN_WHITELIST_MODE="${SSH_CN_WHITELIST_MODE:-}"
+SSH_CN_PROVINCES="${SSH_CN_PROVINCES:-}"
 # Cloudflare 当前已识别的 ASN。可通过同名环境变量显式覆盖。
 CLOUDFLARE_ASNS="${CLOUDFLARE_ASNS:-AS13335 AS14789 AS132892 AS133877 AS202623 AS203898 AS209242 AS394536 AS395747 AS400095 AS402542}"
 CLOUDFLARE_ASN_AUTO_UPDATE="${CLOUDFLARE_ASN_AUTO_UPDATE:-1}"
@@ -38,6 +42,8 @@ IPSET_CN4="fwguard_cn_ipv4"
 IPSET_CN6="fwguard_cn_ipv6"
 IPSET_CF4="fwguard_cloudflare_ipv4"
 IPSET_CF6="fwguard_cloudflare_ipv6"
+IPSET_SSH_CN4="fwguard_ssh_cn_ipv4"
+IPSET_SSH_CN6="fwguard_ssh_cn_ipv6"
 CHAIN_V4="SSH_CF_ASN_GUARD"
 CHAIN_ICMP_V4="CN_ICMP_DROP"
 CHAIN_V6="SSH_CF_ASN_GUARD_V6"
@@ -224,6 +230,116 @@ validate_ssh_port() {
     echo "错误：SSH 端口无效：$port" >&2
     exit 1
   fi
+}
+
+province_code() {
+  case "$1" in
+    anhui|安徽) echo "anhui" ;;
+    beijing|北京) echo "beijing" ;;
+    chongqing|重庆|重慶) echo "chongqing" ;;
+    fujian|福建) echo "fujian" ;;
+    gansu|甘肃|甘肅) echo "gansu" ;;
+    guangdong|广东|廣東) echo "guangdong" ;;
+    guangxi|广西|廣西) echo "guangxi" ;;
+    guizhou|贵州|貴州) echo "guizhou" ;;
+    hainan|海南) echo "hainan" ;;
+    hebei|河北) echo "hebei" ;;
+    heilongjiang|黑龙江|黑龍江) echo "heilongjiang" ;;
+    henan|河南) echo "henan" ;;
+    hubei|湖北) echo "hubei" ;;
+    hunan|湖南) echo "hunan" ;;
+    jiangsu|江苏|江蘇) echo "jiangsu" ;;
+    jiangxi|江西) echo "jiangxi" ;;
+    jilin|吉林) echo "jilin" ;;
+    liaoning|辽宁|遼寧) echo "liaoning" ;;
+    neimenggu|内蒙古|內蒙古) echo "neimenggu" ;;
+    ningxia|宁夏|寧夏) echo "ningxia" ;;
+    qinghai|青海) echo "qinghai" ;;
+    shaanxi|陕西|陝西) echo "shaanxi" ;;
+    shandong|山东|山東) echo "shandong" ;;
+    shanghai|上海) echo "shanghai" ;;
+    shanxi|山西) echo "shanxi" ;;
+    sichuan|四川) echo "sichuan" ;;
+    tianjin|天津) echo "tianjin" ;;
+    xinjiang|新疆) echo "xinjiang" ;;
+    xizang|西藏) echo "xizang" ;;
+    yunnan|云南|雲南) echo "yunnan" ;;
+    zhejiang|浙江) echo "zhejiang" ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_ssh_cn_whitelist_mode() {
+  SSH_CN_WHITELIST_MODE="${SSH_CN_WHITELIST_MODE,,}"
+  case "$SSH_CN_WHITELIST_MODE" in
+    ""|none|all|province) ;;
+    *)
+      echo "错误：SSH_CN_WHITELIST_MODE 只能为 none/all/province。" >&2
+      exit 1
+      ;;
+  esac
+  if [[ "$SSH_CN_WHITELIST_MODE" == "province" && "$CN_PROVINCE_URL_TEMPLATE" != *"%s"* ]]; then
+    echo "错误：CN_PROVINCE_URL_TEMPLATE 必须包含 %s 作为省份代码占位符。" >&2
+    exit 1
+  fi
+}
+
+normalize_ssh_cn_provinces() {
+  local raw token code normalized=""
+
+  raw="${SSH_CN_PROVINCES//,/ }"
+  for token in $raw; do
+    code="$(province_code "${token,,}")" || {
+      echo "错误：不支持的省份名称或代码：$token" >&2
+      exit 1
+    }
+    if [[ " $normalized " != *" $code "* ]]; then
+      normalized="${normalized:+$normalized }$code"
+    fi
+  done
+
+  SSH_CN_PROVINCES="$normalized"
+  if [[ -z "$SSH_CN_PROVINCES" ]]; then
+    echo "错误：省份模式必须至少填写一个省份。" >&2
+    exit 1
+  fi
+}
+
+prompt_ssh_cn_whitelist() {
+  local choice provinces
+
+  normalize_ssh_cn_whitelist_mode
+  if [[ -n "$SSH_CN_WHITELIST_MODE" ]]; then
+    [[ "$SSH_CN_WHITELIST_MODE" == "province" ]] && normalize_ssh_cn_provinces
+    return 0
+  fi
+
+  echo
+  echo "SSH 中国 IP 白名单策略："
+  echo "  1) 不加入中国 IP（仅 Cloudflare ASN，默认）"
+  echo "  2) 加入中国全量 IP 段"
+  echo "  3) 按省份加入中国 IP 段（IPv4）"
+  read -rp "请选择 [1]: " choice
+  case "${choice:-1}" in
+    1)
+      SSH_CN_WHITELIST_MODE="none"
+      ;;
+    2)
+      SSH_CN_WHITELIST_MODE="all"
+      ;;
+    3)
+      SSH_CN_WHITELIST_MODE="province"
+      echo "可输入中文省份或拼音代码，多个用空格或逗号分隔。"
+      echo "示例：guangdong shanghai 或 广东,上海"
+      read -rp "请输入省份: " provinces
+      SSH_CN_PROVINCES="$provinces"
+      normalize_ssh_cn_provinces
+      ;;
+    *)
+      echo "错误：无效选择。" >&2
+      exit 1
+      ;;
+  esac
 }
 
 normalize_cloudflare_asns() {
@@ -416,6 +532,52 @@ download_cloudflare_asn_lists() {
   fi
 }
 
+download_ssh_cn_whitelist_lists() {
+  local tmp4 province url province_file
+
+  rm -f "$STATE_DIR/ssh-cn-v4.clean" "$STATE_DIR/ssh-cn-v6.clean"
+  case "$SSH_CN_WHITELIST_MODE" in
+    none|"")
+      echo "SSH 中国 IP 白名单：未启用。"
+      return 0
+      ;;
+    all)
+      echo "正在生成 SSH 中国全量 IP 白名单……"
+      cp -a "$STATE_DIR/cn-v4.clean" "$STATE_DIR/ssh-cn-v4.clean"
+      if [[ ! -s "$STATE_DIR/ssh-cn-v4.clean" ]]; then
+        echo "错误：SSH 中国 IPv4 白名单为空。" >&2
+        exit 1
+      fi
+      if [[ "$ENABLE_IPV6" == "1" ]]; then
+        cp -a "$STATE_DIR/cn-v6.clean" "$STATE_DIR/ssh-cn-v6.clean"
+      fi
+      ;;
+    province)
+      echo "正在生成 SSH 中国省份 IP 白名单：$SSH_CN_PROVINCES"
+      tmp4="$(mktemp "$STATE_DIR/ssh-cn-v4.clean.XXXXXX")"
+      for province in $SSH_CN_PROVINCES; do
+        url="${CN_PROVINCE_URL_TEMPLATE//%s/$province}"
+        province_file="$STATE_DIR/ssh-cn-${province}.zone"
+        echo "正在下载省份 IPv4 地址段：$province"
+        fetch "$url" "$province_file"
+        grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' "$province_file" >> "$tmp4" || true
+      done
+      sort -u -o "$tmp4" "$tmp4"
+      if [[ ! -s "$tmp4" ]]; then
+        rm -f "$tmp4"
+        echo "错误：省份 SSH IPv4 白名单为空或格式无效。" >&2
+        exit 1
+      fi
+      install -m 0600 "$tmp4" "$STATE_DIR/ssh-cn-v4.clean"
+      rm -f "$tmp4"
+      ;;
+    *)
+      echo "错误：未知 SSH 中国 IP 白名单模式：$SSH_CN_WHITELIST_MODE" >&2
+      exit 1
+      ;;
+  esac
+}
+
 discover_cloudflare_asns() {
   local json_file discovered count
 
@@ -455,6 +617,7 @@ download_lists() {
   discover_cloudflare_asns
   download_cn_lists
   download_cloudflare_asn_lists
+  download_ssh_cn_whitelist_lists
 }
 
 load_one_set() {
@@ -514,10 +677,22 @@ load_one_set() {
 load_ipsets() {
   load_one_set "$IPSET_CN4" inet "$STATE_DIR/cn-v4.clean"
   load_one_set "$IPSET_CF4" inet "$STATE_DIR/cf-v4.clean"
+  if [[ -s "$STATE_DIR/ssh-cn-v4.clean" ]]; then
+    load_one_set "$IPSET_SSH_CN4" inet "$STATE_DIR/ssh-cn-v4.clean"
+  else
+    run ipset destroy "$IPSET_SSH_CN4" 2>/dev/null || true
+  fi
 
   if [[ "$ENABLE_IPV6" == "1" ]]; then
     load_one_set "$IPSET_CN6" inet6 "$STATE_DIR/cn-v6.clean"
     load_one_set "$IPSET_CF6" inet6 "$STATE_DIR/cf-v6.clean"
+    if [[ -s "$STATE_DIR/ssh-cn-v6.clean" ]]; then
+      load_one_set "$IPSET_SSH_CN6" inet6 "$STATE_DIR/ssh-cn-v6.clean"
+    else
+      run ipset destroy "$IPSET_SSH_CN6" 2>/dev/null || true
+    fi
+  else
+    run ipset destroy "$IPSET_SSH_CN6" 2>/dev/null || true
   fi
 }
 
@@ -567,6 +742,9 @@ apply_ipv4_rules() {
   run iptables -N "$CHAIN_V4" 2>/dev/null || true
   run iptables -F "$CHAIN_V4"
   run iptables -A "$CHAIN_V4" -m set --match-set "$IPSET_CF4" src -j ACCEPT
+  if [[ -s "$STATE_DIR/ssh-cn-v4.clean" ]]; then
+    run iptables -A "$CHAIN_V4" -m set --match-set "$IPSET_SSH_CN4" src -j ACCEPT
+  fi
   run iptables -A "$CHAIN_V4" -j DROP
 
   run iptables -N "$CHAIN_ICMP_V4" 2>/dev/null || true
@@ -603,6 +781,9 @@ apply_ipv6_rules() {
   run ip6tables -N "$CHAIN_V6" 2>/dev/null || true
   run ip6tables -F "$CHAIN_V6"
   run ip6tables -A "$CHAIN_V6" -m set --match-set "$IPSET_CF6" src -j ACCEPT
+  if [[ -s "$STATE_DIR/ssh-cn-v6.clean" ]]; then
+    run ip6tables -A "$CHAIN_V6" -m set --match-set "$IPSET_SSH_CN6" src -j ACCEPT
+  fi
   run ip6tables -A "$CHAIN_V6" -j DROP
 
   run ip6tables -N "$CHAIN_ICMP_V6" 2>/dev/null || true
@@ -632,6 +813,7 @@ remove_legacy_country_whitelists() {
   if [[ "$ENABLE_IPV6" != "1" ]]; then
     run ipset destroy "$IPSET_CN6" 2>/dev/null || true
     run ipset destroy "$IPSET_CF6" 2>/dev/null || true
+    run ipset destroy "$IPSET_SSH_CN6" 2>/dev/null || true
   fi
 }
 
@@ -662,6 +844,9 @@ ALLOW_ESTABLISHED="$ALLOW_ESTABLISHED"
 ENABLE_IPV6="$ENABLE_IPV6"
 CN_URL="$CN_URL"
 CN_IPV6_URL="$CN_IPV6_URL"
+CN_PROVINCE_URL_TEMPLATE="$CN_PROVINCE_URL_TEMPLATE"
+SSH_CN_WHITELIST_MODE="$SSH_CN_WHITELIST_MODE"
+SSH_CN_PROVINCES="$SSH_CN_PROVINCES"
 CLOUDFLARE_ASNS="$CLOUDFLARE_ASNS"
 CLOUDFLARE_ASN_AUTO_UPDATE="$CLOUDFLARE_ASN_AUTO_UPDATE"
 RIPESTAT_ASN_SEARCH_URL="$RIPESTAT_ASN_SEARCH_URL"
@@ -679,8 +864,15 @@ persist_rules() {
   local tmp_file
   local set_names=("$IPSET_CN4" "$IPSET_CF4")
 
+  if [[ -s "$STATE_DIR/ssh-cn-v4.clean" ]]; then
+    set_names+=("$IPSET_SSH_CN4")
+  fi
+
   if [[ "$ENABLE_IPV6" == "1" ]]; then
     set_names+=("$IPSET_CN6" "$IPSET_CF6")
+    if [[ -s "$STATE_DIR/ssh-cn-v6.clean" ]]; then
+      set_names+=("$IPSET_SSH_CN6")
+    fi
   fi
 
   mkdir -p "$PERSIST_DIR"
@@ -769,6 +961,11 @@ load_config_if_present() {
   CLOUDFLARE_ASN_AUTO_UPDATE="${CLOUDFLARE_ASN_AUTO_UPDATE:-1}"
   RIPESTAT_ASN_SEARCH_URL="${RIPESTAT_ASN_SEARCH_URL:-https://stat.ripe.net/data/searchcomplete/data.json}"
   RIPESTAT_ANNOUNCED_PREFIXES_URL="${RIPESTAT_ANNOUNCED_PREFIXES_URL:-https://stat.ripe.net/data/announced-prefixes/data.json}"
+  CN_PROVINCE_URL_TEMPLATE="${CN_PROVINCE_URL_TEMPLATE:-https://metowolf.github.io/iplist/data/cncity/%s.txt}"
+  SSH_CN_WHITELIST_MODE="${SSH_CN_WHITELIST_MODE:-none}"
+  SSH_CN_PROVINCES="${SSH_CN_PROVINCES:-}"
+  normalize_ssh_cn_whitelist_mode
+  [[ "$SSH_CN_WHITELIST_MODE" == "province" ]] && normalize_ssh_cn_provinces
   normalize_cloudflare_asns
   IPSET_PERSIST_FILE="$PERSIST_DIR/ipsets"
   LEGACY_IPSET_PERSIST_FILE="$PERSIST_DIR/ipsets.rules"
@@ -847,6 +1044,8 @@ diagnose_rules() {
   fi
   echo "SSH 端口：${SSH_PORT:-22}"
   echo "SSH 白名单来源：Cloudflare 全部 ASN 当前宣告前缀"
+  echo "SSH 中国 IP 白名单模式：${SSH_CN_WHITELIST_MODE:-none}"
+  [[ "${SSH_CN_WHITELIST_MODE:-none}" == "province" ]] && echo "SSH 中国省份白名单：$SSH_CN_PROVINCES"
   echo "Cloudflare ASN：$CLOUDFLARE_ASNS"
   echo "Cloudflare ASN 自动发现：$CLOUDFLARE_ASN_AUTO_UPDATE"
   echo
@@ -870,7 +1069,7 @@ diagnose_rules() {
 
   echo "== 当前 ipset 状态 =="
   echo "说明：fwguard_cn_* 仅用于中国 ICMP 屏蔽，不属于 SSH 白名单。"
-  for set_name in "$IPSET_CN4" "$IPSET_CN6" "$IPSET_CF4" "$IPSET_CF6"; do
+  for set_name in "$IPSET_CN4" "$IPSET_CN6" "$IPSET_CF4" "$IPSET_CF6" "$IPSET_SSH_CN4" "$IPSET_SSH_CN6"; do
     if ipset list "$set_name" >/dev/null 2>&1; then
       printf '%s 条目数：' "$set_name"
       ipset list "$set_name" | awk -F': ' '/Number of entries/ {print $2}'
@@ -889,7 +1088,7 @@ diagnose_rules() {
   echo
 
   echo "== 下载数据状态 =="
-  for data_file in "$STATE_DIR/cn-v4.clean" "$STATE_DIR/cn-v6.clean" "$STATE_DIR/cf-v4.clean" "$STATE_DIR/cf-v6.clean"; do
+  for data_file in "$STATE_DIR/cn-v4.clean" "$STATE_DIR/cn-v6.clean" "$STATE_DIR/cf-v4.clean" "$STATE_DIR/cf-v6.clean" "$STATE_DIR/ssh-cn-v4.clean" "$STATE_DIR/ssh-cn-v6.clean"; do
     if [[ -s "$data_file" ]]; then
       printf '%s：%s 行\n' "$data_file" "$(wc -l < "$data_file" | tr -d ' ')"
     else
@@ -953,13 +1152,22 @@ diagnose_rules() {
 }
 
 print_summary() {
-  local cn4 cn6 cf4 cf6
+  local cn4 cn6 cf4 cf6 ssh_cn4 ssh_cn6 ssh_cn_summary
   cn4="$(wc -l < "$STATE_DIR/cn-v4.clean" | tr -d ' ')"
   cf4="$(wc -l < "$STATE_DIR/cf-v4.clean" | tr -d ' ')"
   cn6="0"
   cf6="0"
+  ssh_cn4="0"
+  ssh_cn6="0"
   [[ -s "$STATE_DIR/cn-v6.clean" ]] && cn6="$(wc -l < "$STATE_DIR/cn-v6.clean" | tr -d ' ')"
   [[ -s "$STATE_DIR/cf-v6.clean" ]] && cf6="$(wc -l < "$STATE_DIR/cf-v6.clean" | tr -d ' ')"
+  [[ -s "$STATE_DIR/ssh-cn-v4.clean" ]] && ssh_cn4="$(wc -l < "$STATE_DIR/ssh-cn-v4.clean" | tr -d ' ')"
+  [[ -s "$STATE_DIR/ssh-cn-v6.clean" ]] && ssh_cn6="$(wc -l < "$STATE_DIR/ssh-cn-v6.clean" | tr -d ' ')"
+  ssh_cn_summary="未启用"
+  case "$SSH_CN_WHITELIST_MODE" in
+    all) ssh_cn_summary="中国全量 IP" ;;
+    province) ssh_cn_summary="中国省份 IP：$SSH_CN_PROVINCES" ;;
+  esac
 
   cat <<EOF
 防火墙规则已应用并完成持久化。
@@ -976,10 +1184,12 @@ systemd 定时器：
 中国 IPv6 地址段：$cn6
 Cloudflare ASN IPv4 前缀：$cf4
 Cloudflare ASN IPv6 前缀：$cf6
+SSH 中国白名单 IPv4 前缀：$ssh_cn4
+SSH 中国白名单 IPv6 前缀：$ssh_cn6
 Cloudflare ASN：$CLOUDFLARE_ASNS
 Cloudflare ASN 自动发现：$CLOUDFLARE_ASN_AUTO_UPDATE
 SSH 端口：$SSH_PORT
-SSH 白名单：仅 Cloudflare 全部 ASN 当前宣告前缀
+SSH 白名单：Cloudflare 全部 ASN 当前宣告前缀；$ssh_cn_summary
 EOF
 
   cat <<EOF
@@ -1004,6 +1214,8 @@ apply_rules() {
   validate_deps
   set_stage "读取 SSH 端口"
   prompt_ssh_port
+  set_stage "读取 SSH 中国 IP 白名单策略"
+  prompt_ssh_cn_whitelist
   normalize_cloudflare_asns
   set_stage "备份当前防火墙规则"
   backup_rules
@@ -1047,6 +1259,8 @@ usage() {
 
 环境变量：
   SSH_PORT=2222                    跳过 SSH 端口交互输入
+  SSH_CN_WHITELIST_MODE=none       SSH 中国白名单模式：none/all/province
+  SSH_CN_PROVINCES="guangdong ..." 省份模式使用，支持中文或拼音代码
   CLOUDFLARE_ASNS="AS13335 ..."    配合关闭自动发现，覆盖 ASN 清单
   CLOUDFLARE_ASN_AUTO_UPDATE=0      关闭 ASN 自动发现，固定使用配置清单
   ROLLBACK_SECONDS=300             未确认时等待多少秒后回滚

@@ -12,6 +12,7 @@ BACKUP_ROOT="/var/backups/fail2ban-installer"
 TS="$(date +%F_%H-%M-%S)"
 BACKUP_DIR="${BACKUP_ROOT}/${TS}"
 UNINSTALL_SCRIPT="${BACKUP_DIR}/uninstall-fail2ban-enhanced.sh"
+CLOUDFLARE_F2B_WHITELIST_FLAG="/etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled"
 
 backup_file_if_exists() {
     local src="$1"
@@ -31,6 +32,7 @@ backup_existing_configs() {
     backup_file_if_exists /etc/fail2ban/filter.d/sshd-aggressive.conf
     backup_file_if_exists /etc/fail2ban/action.d/ufw-ipset.conf
     backup_file_if_exists /etc/fail2ban/action.d/ufw-ipset-persistent.conf
+    backup_file_if_exists /etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled
     backup_file_if_exists /etc/systemd/system/f2b-ipset-restore.service
     backup_file_if_exists /usr/local/bin/f2b-ipset-ensure.sh
     backup_file_if_exists /etc/ipset/f2b-ipset.rules
@@ -62,6 +64,7 @@ systemctl disable f2b-ipset-restore.service >/dev/null 2>&1 || true
 
 rm -f /etc/fail2ban/filter.d/sshd-aggressive.conf
 rm -f /etc/fail2ban/action.d/ufw-ipset-persistent.conf
+rm -f /etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled
 rm -f /etc/systemd/system/f2b-ipset-restore.service
 rm -f /usr/local/bin/f2b-ipset-ensure.sh
 rm -rf /etc/ipset/f2b-counters
@@ -77,6 +80,9 @@ if [ -f "\${BACKUP_DIR}/etc/fail2ban/filter.d/sshd-ddos.conf" ]; then
 fi
 if [ -f "\${BACKUP_DIR}/etc/fail2ban/action.d/ufw-ipset.conf" ]; then
     cp -a "\${BACKUP_DIR}/etc/fail2ban/action.d/ufw-ipset.conf" /etc/fail2ban/action.d/ufw-ipset.conf
+fi
+if [ -f "\${BACKUP_DIR}/etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled" ]; then
+    cp -a "\${BACKUP_DIR}/etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled" /etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled
 fi
 if [ -d "\${BACKUP_DIR}/etc/fail2ban/jail.d" ]; then
     rm -rf /etc/fail2ban/jail.d
@@ -181,11 +187,32 @@ cleanup_legacy_fail2ban_configs() {
     fi
 }
 
+prompt_cloudflare_fail2ban_ipset_whitelist() {
+    local choice
+
+    read -rp "是否启用 Cloudflare ASN ipset 白名单保护，避免 Fail2Ban 封禁 Cloudflare IP？(y=是 / n=否) [默认: n]: " choice
+    case "${choice}" in
+        [Yy])
+            mkdir -p "$(dirname "${CLOUDFLARE_F2B_WHITELIST_FLAG}")"
+            cat > "${CLOUDFLARE_F2B_WHITELIST_FLAG}" <<EOF
+enabled=1
+created_at=$(date '+%F %T %z')
+EOF
+            echo "✅ 已启用 Cloudflare ASN ipset 白名单保护"
+            ;;
+        *)
+            rm -f "${CLOUDFLARE_F2B_WHITELIST_FLAG}"
+            echo "===> 未启用 Cloudflare ASN ipset 白名单保护"
+            ;;
+    esac
+}
+
 echo "===> 安装/更新依赖"
 apt update && apt install -y rsyslog ufw fail2ban ipset
 mkdir -p /etc/ipset
 backup_existing_configs
 cleanup_legacy_fail2ban_configs
+prompt_cloudflare_fail2ban_ipset_whitelist
 
 # ==================== IPset 动态控制核心 ====================
 cat > /usr/local/bin/f2b-ipset-ensure.sh << 'EOS'
@@ -196,6 +223,9 @@ set -euo pipefail
 IPSET_FILE="/etc/ipset/f2b-ipset.rules"
 IPSET_NET24="f2b-blacklist24"
 IPSET_NET16="f2b-blacklist16"
+CF_IPSET4="fwguard_cloudflare_ipv4"
+CF_IPSET6="fwguard_cloudflare_ipv6"
+CF_WHITELIST_FLAG="/etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled"
 COUNTER_DIR="/etc/ipset/f2b-counters"
 
 ensure_sets() {
@@ -219,6 +249,17 @@ save_sets() {
     rm -f "${IPSET_FILE}.16.tmp" "${IPSET_FILE}.24.tmp"
 }
 
+is_cloudflare_ip() {
+    local ip="$1"
+
+    [ -f "${CF_WHITELIST_FLAG}" ] || return 1
+    if [[ "${ip}" == *:* ]]; then
+        ipset test "${CF_IPSET6}" "${ip}" >/dev/null 2>&1
+    else
+        ipset test "${CF_IPSET4}" "${ip}" >/dev/null 2>&1
+    fi
+}
+
 restore_sets() {
     ensure_sets
     if [ -s "${IPSET_FILE}" ]; then ipset restore -exist < "${IPSET_FILE}"; fi
@@ -227,6 +268,17 @@ restore_sets() {
 add_ip() {
     local ip="$2"
     local slash24 slash16
+
+    if is_cloudflare_ip "${ip}"; then
+        echo "Skip Cloudflare ASN IP: ${ip}"
+        exit 0
+    fi
+
+    if [[ "${ip}" == *:* ]]; then
+        echo "Skip IPv6 ban because this action manages IPv4 aggregate sets only: ${ip}"
+        exit 0
+    fi
+
     slash24="$(echo "${ip}" | awk -F. '{print $1"."$2"."$3".0/24"}')"
     slash16="$(echo "${ip}" | awk -F. '{print $1"."$2".0.0/16"}')"
     ensure_sets
@@ -257,6 +309,12 @@ add_ip() {
 remove_ip() {
     local ip="$2"
     local slash24 slash16
+
+    if [[ "${ip}" == *:* ]]; then
+        echo "Skip IPv6 unban because this action manages IPv4 aggregate sets only: ${ip}"
+        exit 0
+    fi
+
     slash24="$(echo "${ip}" | awk -F. '{print $1"."$2"."$3".0/24"}')"
     slash16="$(echo "${ip}" | awk -F. '{print $1"."$2".0.0/16"}')"
     ensure_sets
