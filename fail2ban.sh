@@ -290,18 +290,48 @@ CF_IPSET4="fwguard_cloudflare_ipv4"
 CF_IPSET6="fwguard_cloudflare_ipv6"
 CF_WHITELIST_FLAG="/etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled"
 COUNTER_DIR="/etc/ipset/f2b-counters"
+F2B_CHAIN="F2B_IPSET_GUARD"
 
 ensure_sets() {
     ipset create "${IPSET_NET24}" hash:net family inet timeout 0 -exist
     ipset create "${IPSET_NET16}" hash:net family inet timeout 0 -exist
 }
 
-ensure_ufw_rules() {
-    local chain="ufw-before-input"
-    iptables -C "${chain}" -m set --match-set "${IPSET_NET16}" src -j DROP >/dev/null 2>&1 || \
-    iptables -I "${chain}" 1 -m set --match-set "${IPSET_NET16}" src -j DROP
-    iptables -C "${chain}" -m set --match-set "${IPSET_NET24}" src -j DROP >/dev/null 2>&1 || \
-    iptables -I "${chain}" 2 -m set --match-set "${IPSET_NET24}" src -j DROP
+remove_input_f2b_jump() {
+    while iptables -C INPUT -j "${F2B_CHAIN}" >/dev/null 2>&1; do
+        iptables -D INPUT -j "${F2B_CHAIN}" >/dev/null 2>&1 || break
+    done
+}
+
+input_insert_position() {
+    local rules_count position
+
+    rules_count="$(iptables -S INPUT 2>/dev/null | grep -c '^-A INPUT ' || true)"
+    position=1
+    if iptables -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1; then
+        position=2
+    fi
+    if iptables -S INPUT 2>/dev/null | grep -q -- '-j SSH_CF_ASN_GUARD'; then
+        position=3
+    fi
+    if [ "${position}" -gt $((rules_count + 1)) ]; then
+        position=$((rules_count + 1))
+    fi
+    echo "${position}"
+}
+
+ensure_firewall_rules() {
+    local position
+
+    iptables -N "${F2B_CHAIN}" >/dev/null 2>&1 || true
+    iptables -F "${F2B_CHAIN}"
+    iptables -A "${F2B_CHAIN}" -m set --match-set "${IPSET_NET16}" src -j DROP
+    iptables -A "${F2B_CHAIN}" -m set --match-set "${IPSET_NET24}" src -j DROP
+    iptables -A "${F2B_CHAIN}" -j RETURN
+
+    remove_input_f2b_jump
+    position="$(input_insert_position)"
+    iptables -I INPUT "${position}" -j "${F2B_CHAIN}"
 }
 
 save_sets() {
@@ -365,7 +395,7 @@ add_ip() {
     else
         ipset add "${IPSET_NET24}" "${slash24}" -exist
     fi
-    ensure_ufw_rules
+    ensure_firewall_rules
     save_sets
 }
 
@@ -409,8 +439,8 @@ remove_ip() {
 }
 
 case "${1:-}" in
-    init) ensure_sets; ensure_ufw_rules; save_sets ;;
-    restore) restore_sets; ensure_ufw_rules ;;
+    init) ensure_sets; ensure_firewall_rules; save_sets ;;
+    restore) restore_sets; ensure_firewall_rules ;;
     add) add_ip "$@" ;;
     remove) remove_ip "$@" ;;
     save) ensure_sets; save_sets ;;
@@ -421,7 +451,7 @@ chmod +x /usr/local/bin/f2b-ipset-ensure.sh
 
 cat > /etc/systemd/system/f2b-ipset-restore.service << 'EOF2'
 [Unit]
-Description=Restore Fail2Ban ipset blocks and UFW chain hooks
+Description=Restore Fail2Ban ipset blocks and INPUT chain hook
 DefaultDependencies=no
 After=network-pre.target ufw.service
 Before=fail2ban.service
