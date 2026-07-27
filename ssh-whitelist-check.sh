@@ -73,6 +73,66 @@ input_policy() {
   "$table_cmd" -S INPUT 2>/dev/null | awk '/^-P INPUT / {print $3}'
 }
 
+iptables_backend() {
+  local version
+  version="$(iptables -V 2>/dev/null || true)"
+  if grep -qi 'nf_tables' <<< "$version"; then
+    echo "nft"
+  elif [[ -n "$version" ]]; then
+    echo "iptables"
+  else
+    echo "unknown"
+  fi
+}
+
+switch_to_iptables_legacy() {
+  local alt legacy
+
+  if ! command -v update-alternatives >/dev/null 2>&1; then
+    echo "错误：缺少 update-alternatives，无法自动切换到 iptables-legacy。" >&2
+    exit 1
+  fi
+
+  for alt in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do
+    legacy="/usr/sbin/${alt}-legacy"
+    if [[ -x "$legacy" ]]; then
+      update-alternatives --set "$alt" "$legacy"
+    fi
+  done
+
+  systemctl disable --now nftables >/dev/null 2>&1 || true
+}
+
+prompt_iptables_firewall_backend() {
+  local backend choice
+
+  backend="$(iptables_backend)"
+  echo "当前 iptables 后端：$backend ($(iptables -V 2>/dev/null || echo unknown))"
+  case "$backend" in
+    iptables)
+      ;;
+    nft)
+      read -rp "检测到当前使用 nft 后端。是否切换到 iptables-legacy 并禁用 nftables 服务？(y=是 / n=仅检查) [默认: n]: " choice
+      case "${choice:-n}" in
+        [Yy])
+          switch_to_iptables_legacy
+          if [[ "$(iptables_backend)" != "iptables" ]]; then
+            echo "错误：切换后仍未使用 iptables-legacy，请手动检查 update-alternatives。" >&2
+            exit 1
+          fi
+          echo "已切换到 iptables-legacy，并已尝试禁用 nftables 服务。"
+          ;;
+        *)
+          echo "继续只读检查。注意：nft 后端可能导致 SSH 白名单与实际放行路径不一致。"
+          ;;
+      esac
+      ;;
+    *)
+      echo "警告：无法识别当前 iptables 后端。"
+      ;;
+  esac
+}
+
 input_jumps_to_chain() {
   local table_cmd="$1"
   local chain="$2"
@@ -101,6 +161,25 @@ print_input_rules_for_port() {
       }
     }
   '
+}
+
+print_input_counters_for_port() {
+  local table_cmd="$1"
+  local port="$2"
+
+  "$table_cmd" -nvL INPUT --line-numbers 2>/dev/null | awk -v port="$port" '
+    NR <= 2 { print "  " $0; next }
+    $0 ~ "dpt:" port || $0 ~ "tcp dpt:" port {
+      print "  " $0
+    }
+  '
+}
+
+print_chain_counters() {
+  local table_cmd="$1"
+  local chain="$2"
+
+  "$table_cmd" -nvL "$chain" --line-numbers 2>/dev/null | sed 's/^/  /' || true
 }
 
 warn_early_accept_before_jump() {
@@ -133,6 +212,47 @@ warn_early_accept_before_jump() {
   '
 }
 
+ip_allowed_by_set() {
+  local ip="$1"
+  local set_name="$2"
+
+  set_exists "$set_name" && ipset test "$set_name" "$ip" >/dev/null 2>&1
+}
+
+classify_ip() {
+  local ip="$1"
+  local hits=""
+
+  ip_allowed_by_set "$ip" "$IPSET_CF4" && hits="${hits:+$hits, }Cloudflare IPv4"
+  ip_allowed_by_set "$ip" "$IPSET_CF6" && hits="${hits:+$hits, }Cloudflare IPv6"
+  ip_allowed_by_set "$ip" "$IPSET_SSH_CN4" && hits="${hits:+$hits, }中国 SSH IPv4 白名单"
+  ip_allowed_by_set "$ip" "$IPSET_SSH_CN6" && hits="${hits:+$hits, }中国 SSH IPv6 白名单"
+  echo "${hits:-未命中 SSH 白名单集合}"
+}
+
+print_active_ssh_peers() {
+  local port="${SSH_PORT:-22}"
+
+  echo
+  echo "== 当前已建立 SSH 连接来源 =="
+  if ! command -v ss >/dev/null 2>&1; then
+    echo "缺少 ss 命令，无法检查当前连接。"
+    return
+  fi
+
+  ss -tnp state established "( sport = :$port )" 2>/dev/null | awk 'NR > 1 {print $5}' | while read -r peer; do
+    [[ -n "$peer" ]] || continue
+    if [[ "$peer" == \[* ]]; then
+      peer="${peer#\[}"
+      peer="${peer%%\]*}"
+    else
+      peer="${peer%:*}"
+    fi
+    echo "来源：$peer -> $(classify_ip "$peer")"
+  done
+  echo "提示：已建立连接会被 ESTABLISHED,RELATED 规则继续放行；请用全新的 SSH TCP 连接验证拦截。"
+}
+
 print_listening_ssh_ports() {
   echo
   echo "== SSH 实际监听端口 =="
@@ -156,12 +276,17 @@ print_firewall_context() {
   echo "iptables INPUT 默认策略：$(input_policy iptables || echo 未知)"
   if command -v iptables >/dev/null 2>&1; then
     iptables -V 2>/dev/null || true
+    echo
+    echo "iptables-save 中与 SSH 端口/白名单相关的规则："
+    iptables-save 2>/dev/null | grep -E -- "--dport (${SSH_PORT:-22}|22|2222|22222)|SSH_CF_ASN_GUARD|fwguard_cloudflare|fwguard_ssh_cn" | head -n 120 || true
   fi
   if command -v ufw >/dev/null 2>&1; then
     ufw status verbose 2>/dev/null || true
   fi
-  if command -v nft >/dev/null 2>&1; then
-    nft list ruleset 2>/dev/null | grep -E 'dport (22|2222|22222)|SSH_CF_ASN_GUARD|fwguard_cloudflare|fwguard_ssh_cn' | head -n 40 || true
+  if [[ "$ENABLE_IPV6" == "1" ]] && command -v ip6tables-save >/dev/null 2>&1; then
+    echo
+    echo "ip6tables-save 中与 SSH 端口/白名单相关的规则："
+    ip6tables-save 2>/dev/null | grep -E -- "--dport (${SSH_PORT:-22}|22|2222|22222)|SSH_CF_ASN_GUARD|fwguard_cloudflare|fwguard_ssh_cn" | head -n 120 || true
   fi
 }
 
@@ -186,6 +311,10 @@ print_path_diagnosis() {
   fi
   echo "INPUT 中匹配 tcp/$port 的规则："
   print_input_rules_for_port "$table_cmd" "$port"
+  echo "INPUT 计数器中匹配 tcp/$port 的规则："
+  print_input_counters_for_port "$table_cmd" "$port"
+  echo "$chain 计数器："
+  print_chain_counters "$table_cmd" "$chain"
   warn_early_accept_before_jump "$table_cmd" "$chain" "$port"
   if [[ "$(input_policy "$table_cmd" || true)" == "ACCEPT" ]] && ! input_jumps_to_chain_for_port "$table_cmd" "$chain" "$port"; then
     echo "[WARN] INPUT 默认策略是 ACCEPT，且没有白名单跳转，未命中规则的 SSH 连接会被允许。"
@@ -291,7 +420,7 @@ case "${1:-}" in
 用法：$0 [--sample-limit N] [--ip 1.2.3.4]
 
 读取当前 fwguard SSH 白名单链和 ipset 集合，输出各 IP 段归属、条目数和样例前缀。
-只读检查，不修改任何防火墙规则。
+如果检测到 nft 后端，可按提示选择切换到 iptables-legacy 并禁用 nftables 服务。
 EOF
     exit 0
     ;;
@@ -307,7 +436,9 @@ if [[ "${SSH_CN_WHITELIST_MODE:-none}" == "province" ]]; then
   echo "中国 SSH 白名单省份：$(format_provinces)"
 fi
 
+prompt_iptables_firewall_backend
 print_listening_ssh_ports
+print_active_ssh_peers
 print_firewall_context
 
 echo

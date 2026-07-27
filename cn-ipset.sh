@@ -44,6 +44,68 @@ ensure_dependency() {
   fi
 }
 
+iptables_backend() {
+  local version
+  version="$(iptables -V 2>/dev/null || true)"
+  if grep -qi 'nf_tables' <<< "$version"; then
+    echo "nft"
+  elif [ -n "$version" ]; then
+    echo "iptables"
+  else
+    echo "unknown"
+  fi
+}
+
+switch_to_iptables_legacy() {
+  local alt legacy
+
+  if ! command -v update-alternatives >/dev/null 2>&1; then
+    echo "[ERROR] 缺少 update-alternatives，无法自动切换到 iptables-legacy"
+    exit 1
+  fi
+
+  for alt in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do
+    legacy="/usr/sbin/${alt}-legacy"
+    if [ -x "$legacy" ]; then
+      update-alternatives --set "$alt" "$legacy"
+    fi
+  done
+
+  systemctl disable --now nftables >/dev/null 2>&1 || true
+}
+
+ensure_iptables_firewall_backend() {
+  local backend choice
+
+  backend="$(iptables_backend)"
+  echo "[INFO] 当前 iptables 后端: $backend ($(iptables -V 2>/dev/null || echo unknown))"
+  case "$backend" in
+    iptables)
+      ;;
+    nft)
+      read -rp "检测到当前使用 nft 后端。是否切换到 iptables-legacy 并禁用 nftables 服务？(y=是 / n=停止) [默认: y]: " choice
+      case "${choice:-y}" in
+        [Yy])
+          switch_to_iptables_legacy
+          if [ "$(iptables_backend)" != "iptables" ]; then
+            echo "[ERROR] 切换后仍未使用 iptables-legacy，请手动检查 update-alternatives"
+            exit 1
+          fi
+          echo "[INFO] 已切换到 iptables-legacy，并已尝试禁用 nftables 服务。"
+          ;;
+        *)
+          echo "[ERROR] 已停止。请先切换到 iptables-legacy。"
+          exit 1
+          ;;
+      esac
+      ;;
+    *)
+      echo "[ERROR] 无法识别当前 iptables 后端"
+      exit 1
+      ;;
+  esac
+}
+
 rollback_all() {
   echo "[WARN] 检测到网络异常，开始回滚..."
 
@@ -77,6 +139,7 @@ ensure_dependency ipset ipset
 ensure_dependency iptables iptables
 ensure_dependency systemctl systemd
 ensure_dependency ping iputils-ping
+ensure_iptables_firewall_backend
 
 cat > "$SCRIPT_PATH" <<'SCRIPT_EOF'
 #!/bin/bash
