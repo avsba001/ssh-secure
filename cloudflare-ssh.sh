@@ -17,6 +17,7 @@ DRY_RUN="${DRY_RUN:-0}"
 CN_URL="${CN_URL:-https://www.ipdeny.com/ipblocks/data/countries/cn.zone}"
 CN_IPV6_URL="${CN_IPV6_URL:-https://www.ipdeny.com/ipv6/ipaddresses/blocks/cn.zone}"
 CN_PROVINCE_URL_TEMPLATE="${CN_PROVINCE_URL_TEMPLATE:-https://metowolf.github.io/iplist/data/cncity/%s.txt}"
+CN_PROVINCE_FALLBACK_URL_TEMPLATE="${CN_PROVINCE_FALLBACK_URL_TEMPLATE:-https://metowolf.github.io/iplist/data/country/CN/CN-%s.txt}"
 SSH_CN_WHITELIST_MODE="${SSH_CN_WHITELIST_MODE:-}"
 SSH_CN_PROVINCES="${SSH_CN_PROVINCES:-}"
 # Cloudflare 当前已识别的 ASN。可通过同名环境变量显式覆盖。
@@ -272,6 +273,46 @@ province_code() {
   esac
 }
 
+province_iso() {
+  case "$1" in
+    110000|beijing|北京) echo "BJ" ;;
+    120000|tianjin|天津) echo "TJ" ;;
+    130000|hebei|河北) echo "HE" ;;
+    140000|shanxi|山西) echo "SX" ;;
+    150000|neimenggu|内蒙古|內蒙古) echo "NM" ;;
+    210000|liaoning|辽宁|遼寧) echo "LN" ;;
+    220000|jilin|吉林) echo "JL" ;;
+    230000|heilongjiang|黑龙江|黑龍江) echo "HL" ;;
+    310000|shanghai|上海) echo "SH" ;;
+    320000|jiangsu|江苏|江蘇) echo "JS" ;;
+    330000|zhejiang|浙江) echo "ZJ" ;;
+    340000|anhui|安徽) echo "AH" ;;
+    350000|fujian|福建) echo "FJ" ;;
+    360000|jiangxi|江西) echo "JX" ;;
+    370000|shandong|山东|山東) echo "SD" ;;
+    410000|henan|河南) echo "HA" ;;
+    420000|hubei|湖北) echo "HB" ;;
+    430000|hunan|湖南) echo "HN" ;;
+    440000|guangdong|广东|廣東) echo "GD" ;;
+    450000|guangxi|广西|廣西) echo "GX" ;;
+    460000|hainan|海南) echo "HI" ;;
+    500000|chongqing|重庆|重慶) echo "CQ" ;;
+    510000|sichuan|四川) echo "SC" ;;
+    520000|guizhou|贵州|貴州) echo "GZ" ;;
+    530000|yunnan|云南|雲南) echo "YN" ;;
+    540000|xizang|西藏) echo "XZ" ;;
+    610000|shaanxi|陕西|陝西) echo "SN" ;;
+    620000|gansu|甘肃|甘肅) echo "GS" ;;
+    630000|qinghai|青海) echo "QH" ;;
+    640000|ningxia|宁夏|寧夏) echo "NX" ;;
+    650000|xinjiang|新疆) echo "XJ" ;;
+    710000|taiwan|台湾|台灣) echo "TW" ;;
+    810000|hongkong|xianggang|香港) echo "HK" ;;
+    820000|macau|macao|aomen|澳门|澳門) echo "MO" ;;
+    *) return 1 ;;
+  esac
+}
+
 normalize_ssh_cn_whitelist_mode() {
   SSH_CN_WHITELIST_MODE="${SSH_CN_WHITELIST_MODE,,}"
   case "$SSH_CN_WHITELIST_MODE" in
@@ -283,6 +324,10 @@ normalize_ssh_cn_whitelist_mode() {
   esac
   if [[ "$SSH_CN_WHITELIST_MODE" == "province" && "$CN_PROVINCE_URL_TEMPLATE" != *"%s"* ]]; then
     echo "错误：CN_PROVINCE_URL_TEMPLATE 必须包含 %s 作为省份代码占位符。" >&2
+    exit 1
+  fi
+  if [[ "$SSH_CN_WHITELIST_MODE" == "province" && "$CN_PROVINCE_FALLBACK_URL_TEMPLATE" != *"%s"* ]]; then
+    echo "错误：CN_PROVINCE_FALLBACK_URL_TEMPLATE 必须包含 %s 作为省份代码占位符。" >&2
     exit 1
   fi
 }
@@ -536,7 +581,7 @@ download_cloudflare_asn_lists() {
 }
 
 download_ssh_cn_whitelist_lists() {
-  local tmp4 province url province_file
+  local tmp4 province iso primary_url fallback_url province_file
 
   rm -f "$STATE_DIR/ssh-cn-v4.clean" "$STATE_DIR/ssh-cn-v6.clean"
   case "$SSH_CN_WHITELIST_MODE" in
@@ -559,10 +604,20 @@ download_ssh_cn_whitelist_lists() {
       echo "正在生成 SSH 中国省份 IP 白名单：$SSH_CN_PROVINCES"
       tmp4="$(mktemp "$STATE_DIR/ssh-cn-v4.clean.XXXXXX")"
       for province in $SSH_CN_PROVINCES; do
-        url="${CN_PROVINCE_URL_TEMPLATE//%s/$province}"
+        iso="$(province_iso "$province")" || {
+          rm -f "$tmp4"
+          echo "错误：无法识别省份代码：$province" >&2
+          exit 1
+        }
+        primary_url="${CN_PROVINCE_URL_TEMPLATE//%s/$province}"
+        fallback_url="${CN_PROVINCE_FALLBACK_URL_TEMPLATE//%s/$iso}"
         province_file="$STATE_DIR/ssh-cn-${province}.zone"
         echo "正在下载省份 IPv4 地址段：$province"
-        fetch "$url" "$province_file"
+        echo "尝试数据源：$primary_url"
+        if ! fetch "$primary_url" "$province_file"; then
+          echo "主数据源不可用，尝试备用源：$fallback_url"
+          fetch "$fallback_url" "$province_file"
+        fi
         grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' "$province_file" >> "$tmp4" || true
       done
       sort -u -o "$tmp4" "$tmp4"
@@ -848,6 +903,7 @@ ENABLE_IPV6="$ENABLE_IPV6"
 CN_URL="$CN_URL"
 CN_IPV6_URL="$CN_IPV6_URL"
 CN_PROVINCE_URL_TEMPLATE="$CN_PROVINCE_URL_TEMPLATE"
+CN_PROVINCE_FALLBACK_URL_TEMPLATE="$CN_PROVINCE_FALLBACK_URL_TEMPLATE"
 SSH_CN_WHITELIST_MODE="$SSH_CN_WHITELIST_MODE"
 SSH_CN_PROVINCES="$SSH_CN_PROVINCES"
 CLOUDFLARE_ASNS="$CLOUDFLARE_ASNS"
@@ -965,6 +1021,7 @@ load_config_if_present() {
   RIPESTAT_ASN_SEARCH_URL="${RIPESTAT_ASN_SEARCH_URL:-https://stat.ripe.net/data/searchcomplete/data.json}"
   RIPESTAT_ANNOUNCED_PREFIXES_URL="${RIPESTAT_ANNOUNCED_PREFIXES_URL:-https://stat.ripe.net/data/announced-prefixes/data.json}"
   CN_PROVINCE_URL_TEMPLATE="${CN_PROVINCE_URL_TEMPLATE:-https://metowolf.github.io/iplist/data/cncity/%s.txt}"
+  CN_PROVINCE_FALLBACK_URL_TEMPLATE="${CN_PROVINCE_FALLBACK_URL_TEMPLATE:-https://metowolf.github.io/iplist/data/country/CN/CN-%s.txt}"
   SSH_CN_WHITELIST_MODE="${SSH_CN_WHITELIST_MODE:-none}"
   SSH_CN_PROVINCES="${SSH_CN_PROVINCES:-}"
   normalize_ssh_cn_whitelist_mode
@@ -1264,6 +1321,8 @@ usage() {
   SSH_PORT=2222                    跳过 SSH 端口交互输入
   SSH_CN_WHITELIST_MODE=none       SSH 中国白名单模式：none/all/province
   SSH_CN_PROVINCES="hubei ..."     省份模式使用，支持中文、拼音或 6 位行政区划代码
+  CN_PROVINCE_URL_TEMPLATE=...      省份主数据源，使用 %s 代表 6 位行政区划代码
+  CN_PROVINCE_FALLBACK_URL_TEMPLATE=... 省份备用数据源，使用 %s 代表 ISO 省份缩写
   CLOUDFLARE_ASNS="AS13335 ..."    配合关闭自动发现，覆盖 ASN 清单
   CLOUDFLARE_ASN_AUTO_UPDATE=0      关闭 ASN 自动发现，固定使用配置清单
   ROLLBACK_SECONDS=300             未确认时等待多少秒后回滚
