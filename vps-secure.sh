@@ -4,7 +4,7 @@ set -e
 ### ===== 基本信息 =====
 SCRIPT_NAME="vps-secure.sh"
 REPO_RAW="https://raw.githubusercontent.com/avsba001/vps-secure/main"
-LOCAL_VERSION="1.0.14"
+LOCAL_VERSION="1.0.15"
 
 ### ===== 防止无限自更新 =====
 if [ "$VPS_SECURE_UPDATED" != "1" ]; then
@@ -120,9 +120,9 @@ restore_from_backup() {
     5)
       systemctl stop cn-ipset >/dev/null 2>&1 || true
       systemctl disable cn-ipset >/dev/null 2>&1 || true
-      iptables -D INPUT -p icmp -m set --match-set cn src -j DROP >/dev/null 2>&1 || true
-      ipset flush cn >/dev/null 2>&1 || true
-      ipset destroy cn >/dev/null 2>&1 || true
+      iptables -D INPUT -p icmp -m set --match-set fwguard_cn_ipv4 src -j DROP >/dev/null 2>&1 || true
+      ipset flush fwguard_cn_ipv4 >/dev/null 2>&1 || true
+      ipset destroy fwguard_cn_ipv4 >/dev/null 2>&1 || true
       [ -f "$dir/usr/local/bin/update-cn-ipset.sh" ] && cp -a "$dir/usr/local/bin/update-cn-ipset.sh" /usr/local/bin/update-cn-ipset.sh
       [ -f "$dir/etc/systemd/system/cn-ipset.service" ] && cp -a "$dir/etc/systemd/system/cn-ipset.service" /etc/systemd/system/cn-ipset.service
       systemctl daemon-reload
@@ -215,7 +215,7 @@ run_script_without_backup() {
   echo ">>> $script 执行完成"
 }
 
-VERSION="1.0.14"
+VERSION="1.0.15"
 
 while true; do
   echo
@@ -225,7 +225,7 @@ while true; do
   echo "=============================="
   echo "1) SSH 安全配置"
   echo "2) CAKE 队列配置"
-  echo "3) Fail2Ban 防爆破"
+  echo "3) Fail2Ban 防爆破（非常严格）"
   echo "4) XanMod Cloud 精简内核安装"
   echo "5) 中国 IP ICMP 屏蔽（ipset + systemd）"
   echo "6) PMTU MSS 自动修正（iptables mangle）"

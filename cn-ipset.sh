@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-IPSET_NAME="cn"
+IPSET_NAME="fwguard_cn_ipv4"
 LIST_URL="https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
 TMP_FILE="/tmp/china_ip_list.txt"
 SCRIPT_PATH="/usr/local/bin/update-cn-ipset.sh"
@@ -82,7 +82,7 @@ cat > "$SCRIPT_PATH" <<'SCRIPT_EOF'
 #!/bin/bash
 set -e
 
-IPSET_NAME="cn"
+IPSET_NAME="fwguard_cn_ipv4"
 LIST_URL="https://raw.githubusercontent.com/17mon/china_ip_list/master/china_ip_list.txt"
 TMP_FILE="/tmp/china_ip_list.txt"
 
