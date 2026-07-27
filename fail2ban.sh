@@ -496,6 +496,10 @@ EOF5
 ensure_generated_files
 ufw --force enable >/dev/null 2>&1 || true
 /usr/local/bin/f2b-ipset-ensure.sh init
+if [ -x /usr/local/sbin/fwguard-firewall ] && [ -s /etc/fwguard-ipset/config ]; then
+    echo "===> 重新排序 Cloudflare SSH 白名单链，确保其位于 UFW SSH 放行规则之前"
+    /usr/local/sbin/fwguard-firewall refresh >/dev/null 2>&1 || true
+fi
 
 systemctl daemon-reload
 systemctl enable f2b-ipset-restore.service >/dev/null

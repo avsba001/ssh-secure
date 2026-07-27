@@ -10,7 +10,6 @@ VPS 安全与网络优化一键工具。`vps-secure.sh` 是主入口脚本，提
 | 2 | `cake.sh` | 配置 CAKE 队列管理，并创建 systemd 服务实现开机自动应用。 |
 | 3 | `fail2ban.sh` | 安装并配置 Fail2Ban、UFW 与 ipset，对 SSH 爆破进行更强拦截和持久化封禁；可选择启用 Cloudflare ASN ipset 白名单保护，避免误封 Cloudflare IP。 |
 | 4 | `xanmod.sh` | 从指定内核仓库选择并安装 XanMod Cloud 精简内核。 |
-| 5 | `cn-ipset.sh` | 下载中国 IP 段，使用 ipset + iptables 屏蔽来自中国 IP 的 ICMP，并通过 systemd 开机应用。 |
 | 6 | `pmtu-mss.sh` | 设置 iptables/ip6tables mangle 规则，按 MTU 自动计算并固定 TCP MSS，缓解 PMTU 问题。 |
 | 7 | `cloudflare-ssh.sh` | SSH 默认仅允许 Cloudflare ASN 当前宣告的 IP 前缀访问，可选额外加入中国全量或指定省份 IP 白名单，同时屏蔽中国 IP 段 ICMP/ICMPv6，并配置定时更新和回滚保护。 |
 | 8 | `ssh-whitelist-check.sh` | 检查当前生效的 SSH 白名单链和 ipset 集合，显示 Cloudflare ASN、中国全量或中国省份等 IP 段归属；发现 nft 后端时可选择切换到 iptables-legacy。 |
@@ -36,5 +35,6 @@ bash <(curl -sL https://gh-proxy.com/https://raw.githubusercontent.com/avsba001/
 - 大部分修改会在 `/var/backups/vps-secure` 下保存最近备份，可通过菜单中的“撤销修改”恢复。
 - `xanmod.sh` 安装内核后需要重启系统才能加载新内核，主脚本不提供自动回滚。
 - `cloudflare-ssh.sh` 自带回滚保护。应用后请按脚本提示确认 SSH 和网络正常，再执行确认命令保留规则。
+- 中国 IP ICMP 屏蔽已合并到 `cloudflare-ssh.sh`，不再提供独立 `cn-ipset.sh`。
 - 部分辅助脚本会检查当前 `iptables` 后端；`cloudflare-ssh.sh` 已恢复为最早版本的 iptables 规则流程，并在此基础上提供可选中国/省份 SSH 白名单。
 - 如果 SSH 白名单看起来未生效，可运行菜单 8 检查端口、链挂接、同端口提前放行规则和 ipset 归属；当前已建立的 SSH 连接会被已建立连接规则继续放行，请用新连接验证。

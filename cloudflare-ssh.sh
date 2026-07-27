@@ -698,9 +698,12 @@ load_ipsets() {
 
 ensure_established_rule() {
   local cmd="$1"
-  if ! "$cmd" -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1; then
-    run "$cmd" -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  fi
+
+  while "$cmd" -C INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1; do
+    run "$cmd" -D INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    [[ "$DRY_RUN" == "1" ]] && break
+  done
+  run "$cmd" -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 }
 
 ensure_jump() {
@@ -710,9 +713,11 @@ ensure_jump() {
   local position="${4:-2}"
   shift 4
 
-  if ! "$table_cmd" -C INPUT -p "$proto" "$@" -j "$chain" >/dev/null 2>&1; then
-    run "$table_cmd" -I INPUT "$position" -p "$proto" "$@" -j "$chain"
-  fi
+  while "$table_cmd" -C INPUT -p "$proto" "$@" -j "$chain" >/dev/null 2>&1; do
+    run "$table_cmd" -D INPUT -p "$proto" "$@" -j "$chain"
+    [[ "$DRY_RUN" == "1" ]] && break
+  done
+  run "$table_cmd" -I INPUT "$position" -p "$proto" "$@" -j "$chain"
 }
 
 remove_input_jumps_to_chain() {

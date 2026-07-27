@@ -4,7 +4,7 @@ set -e
 ### ===== 基本信息 =====
 SCRIPT_NAME="vps-secure.sh"
 REPO_RAW="https://raw.githubusercontent.com/avsba001/vps-secure/main"
-LOCAL_VERSION="1.0.25"
+LOCAL_VERSION="1.0.26"
 
 ### ===== 防止无限自更新 =====
 if [ "$VPS_SECURE_UPDATED" != "1" ]; then
@@ -46,9 +46,6 @@ backup_paths_for_step() {
       ;;
     3)
       echo "/etc/fail2ban/jail.local /etc/fail2ban/filter.d/sshd-disconnect.conf /etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled"
-      ;;
-    5)
-      echo "/usr/local/bin/update-cn-ipset.sh /etc/systemd/system/cn-ipset.service"
       ;;
     6)
       echo ""
@@ -119,22 +116,12 @@ restore_from_backup() {
       [ -f "$dir/etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled" ] && cp -a "$dir/etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled" /etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled
       systemctl restart fail2ban >/dev/null 2>&1 || true
       ;;
-    5)
-      systemctl stop cn-ipset >/dev/null 2>&1 || true
-      systemctl disable cn-ipset >/dev/null 2>&1 || true
-      iptables -D INPUT -p icmp -m set --match-set fwguard_cn_ipv4 src -j DROP >/dev/null 2>&1 || true
-      ipset flush fwguard_cn_ipv4 >/dev/null 2>&1 || true
-      ipset destroy fwguard_cn_ipv4 >/dev/null 2>&1 || true
-      [ -f "$dir/usr/local/bin/update-cn-ipset.sh" ] && cp -a "$dir/usr/local/bin/update-cn-ipset.sh" /usr/local/bin/update-cn-ipset.sh
-      [ -f "$dir/etc/systemd/system/cn-ipset.service" ] && cp -a "$dir/etc/systemd/system/cn-ipset.service" /etc/systemd/system/cn-ipset.service
-      systemctl daemon-reload
-      [ -f /etc/systemd/system/cn-ipset.service ] && systemctl enable --now cn-ipset >/dev/null 2>&1 || true
-      ;;
     6)
-      iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 || true
-      iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 || true
-      ip6tables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 || true
-      ip6tables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu >/dev/null 2>&1 || true
+      PMTU_MTU="${PMTU_MTU:-1480}"
+      PMTU_IPV4_MSS=$((PMTU_MTU - 40))
+      PMTU_IPV6_MSS=$((PMTU_MTU - 60))
+      while iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$PMTU_IPV4_MSS" >/dev/null 2>&1; do :; done
+      while ip6tables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$PMTU_IPV6_MSS" >/dev/null 2>&1; do :; done
       netfilter-persistent save >/dev/null 2>&1 || true
       ;;
     7)
@@ -162,7 +149,7 @@ restore_from_backup() {
       fi
       ;;
     *)
-      echo "[WARN] 当前仅支持回滚步骤 1/2/3/5/6/7"
+      echo "[WARN] 当前仅支持回滚步骤 1/2/3/6/7"
       return 1
       ;;
   esac
@@ -176,13 +163,12 @@ rollback_menu() {
   echo "1) 撤销 SSH 安全配置"
   echo "2) 撤销 CAKE 配置"
   echo "3) 撤销 Fail2Ban 配置"
-  echo "5) 撤销 中国 IP ICMP 屏蔽"
   echo "6) 撤销 PMTU MSS 设置"
   echo "7) 撤销 Cloudflare SSH 防火墙规则"
   echo "0) 返回"
   read -rp "请选择要撤销的步骤: " rb
   case "$rb" in
-    1|2|3|5|6|7)
+    1|2|3|6|7)
       restore_from_backup "$rb"
       ;;
     0)
@@ -217,7 +203,7 @@ run_script_without_backup() {
   echo ">>> $script 执行完成"
 }
 
-VERSION="1.0.25"
+VERSION="1.0.26"
 
 while true; do
   echo
@@ -229,7 +215,6 @@ while true; do
   echo "2) CAKE 队列配置"
   echo "3) Fail2Ban 防爆破（非常严格）"
   echo "4) XanMod Cloud 精简内核安装"
-  echo "5) 中国 IP ICMP 屏蔽（ipset + systemd）"
   echo "6) PMTU MSS 自动修正（iptables mangle）"
   echo "7) Cloudflare ASN SSH 白名单（可加中国/省份）+ 中国 ICMP 屏蔽"
   echo "8) 检查当前 SSH 白名单 IP 段归属"
@@ -253,9 +238,6 @@ while true; do
       echo "[INFO] XanMod 安装不提供自动回滚，继续执行。"
       run_script_without_backup "xanmod.sh"
       ;;
-    5)
-      run_step 5 "cn-ipset.sh"
-      ;;
     6)
       run_step 6 "pmtu-mss.sh"
       ;;
@@ -271,7 +253,6 @@ while true; do
       run_step 3 "fail2ban.sh"
       echo "[INFO] XanMod 安装不提供自动回滚，继续执行。"
       run_script_without_backup "xanmod.sh"
-      run_step 5 "cn-ipset.sh"
       run_step 6 "pmtu-mss.sh"
       run_step 7 "cloudflare-ssh.sh"
       ;;
