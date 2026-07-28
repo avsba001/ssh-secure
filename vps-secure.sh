@@ -4,7 +4,7 @@ set -e
 ### ===== 基本信息 =====
 SCRIPT_NAME="vps-secure.sh"
 REPO_RAW="https://raw.githubusercontent.com/avsba001/vps-secure/main"
-LOCAL_VERSION="1.0.27"
+LOCAL_VERSION="1.0.28"
 
 ### ===== 防止无限自更新 =====
 if [ "$VPS_SECURE_UPDATED" != "1" ]; then
@@ -157,6 +157,166 @@ restore_from_backup() {
   echo "✅ 步骤 $step 已从备份恢复"
 }
 
+delete_chain_references() {
+  local table_cmd="$1"
+  local table="$2"
+  local chain="$3"
+  local parent
+  local spec
+
+  for parent in INPUT FORWARD OUTPUT PREROUTING POSTROUTING; do
+    while true; do
+      if [ -n "$table" ]; then
+        spec="$("$table_cmd" -t "$table" -S "$parent" 2>/dev/null | grep -- "-j $chain" | head -n 1 | sed "s/^-A $parent /-D $parent /" || true)"
+      else
+        spec="$("$table_cmd" -S "$parent" 2>/dev/null | grep -- "-j $chain" | head -n 1 | sed "s/^-A $parent /-D $parent /" || true)"
+      fi
+      [ -n "$spec" ] || break
+      if [ -n "$table" ]; then
+        # shellcheck disable=SC2086
+        "$table_cmd" -t "$table" $spec >/dev/null 2>&1 || break
+      else
+        # shellcheck disable=SC2086
+        "$table_cmd" $spec >/dev/null 2>&1 || break
+      fi
+    done
+  done
+}
+
+delete_chain() {
+  local table_cmd="$1"
+  local table="$2"
+  local chain="$3"
+
+  delete_chain_references "$table_cmd" "$table" "$chain"
+  if [ -n "$table" ]; then
+    "$table_cmd" -t "$table" -F "$chain" >/dev/null 2>&1 || true
+    "$table_cmd" -t "$table" -X "$chain" >/dev/null 2>&1 || true
+  else
+    "$table_cmd" -F "$chain" >/dev/null 2>&1 || true
+    "$table_cmd" -X "$chain" >/dev/null 2>&1 || true
+  fi
+}
+
+delete_ipset() {
+  local set_name="$1"
+
+  ipset flush "$set_name" >/dev/null 2>&1 || true
+  ipset destroy "$set_name" >/dev/null 2>&1 || true
+}
+
+uninstall_cake() {
+  systemctl disable --now set-cake.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/set-cake.service /usr/local/bin/set-cake.sh
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  echo "✅ 已卸载 CAKE 配置"
+}
+
+uninstall_fail2ban_config() {
+  systemctl disable --now f2b-ipset-restore.service >/dev/null 2>&1 || true
+  delete_chain iptables "" F2B_IPSET_GUARD
+  delete_ipset f2b-blacklist
+  delete_ipset f2b-blacklist24
+  delete_ipset f2b-blacklist16
+  rm -f /usr/local/bin/f2b-ipset-ensure.sh
+  rm -f /etc/systemd/system/f2b-ipset-restore.service
+  rm -f /etc/fail2ban/action.d/ufw-ipset.conf
+  rm -f /etc/fail2ban/action.d/ufw-ipset-persistent.conf
+  rm -f /etc/fail2ban/jail.local
+  rm -f /etc/fail2ban/filter.d/sshd-disconnect.conf
+  rm -f /etc/fail2ban/filter.d/sshd-ddos.conf
+  rm -f /etc/fail2ban/filter.d/sshd-aggressive.conf
+  rm -f /etc/fail2ban/f2b-cloudflare-ipset-whitelist.enabled
+  rm -f /etc/ipset/f2b-ipset.rules
+  rm -rf /etc/ipset/f2b-counters
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl restart fail2ban >/dev/null 2>&1 || true
+  echo "✅ 已卸载 Fail2Ban 的本项目配置，未删除 fail2ban/ufw/ipset 软件包"
+}
+
+uninstall_pmtu_mss() {
+  local mtu ipv4_mss ipv6_mss
+
+  mtu="${PMTU_MTU:-1480}"
+  ipv4_mss=$((mtu - 40))
+  ipv6_mss=$((mtu - 60))
+  while iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$ipv4_mss" >/dev/null 2>&1; do :; done
+  while ip6tables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss "$ipv6_mss" >/dev/null 2>&1; do :; done
+  netfilter-persistent save >/dev/null 2>&1 || true
+  echo "✅ 已卸载 PMTU MSS 规则"
+}
+
+uninstall_cloudflare_ssh() {
+  systemctl disable --now fwguard-ipset-refresh.timer >/dev/null 2>&1 || true
+  systemctl disable --now fwguard-ipset-refresh.service >/dev/null 2>&1 || true
+  systemctl disable --now fwguard-ipset-restore.service >/dev/null 2>&1 || true
+  delete_chain iptables "" SSH_CF_ASN_GUARD
+  delete_chain iptables "" SSH_CF_CN_GUARD
+  delete_chain iptables "" CN_ICMP_DROP
+  delete_chain ip6tables "" SSH_CF_ASN_GUARD_V6
+  delete_chain ip6tables "" SSH_CF_CN_GUARD_V6
+  delete_chain ip6tables "" CN_ICMP_DROP_V6
+  delete_ipset fwguard_cn_ipv4
+  delete_ipset fwguard_cn_ipv6
+  delete_ipset fwguard_cloudflare_ipv4
+  delete_ipset fwguard_cloudflare_ipv6
+  delete_ipset fwguard_ssh_cn_ipv4
+  delete_ipset fwguard_ssh_cn_ipv6
+  for set_name in $(ipset list -name 2>/dev/null | grep '^fwguard_' || true); do
+    delete_ipset "$set_name"
+  done
+  rm -f /usr/local/sbin/fwguard-firewall
+  rm -rf /etc/fwguard-ipset
+  rm -f /etc/systemd/system/fwguard-ipset-restore.service
+  rm -f /etc/systemd/system/fwguard-ipset-refresh.service
+  rm -f /etc/systemd/system/fwguard-ipset-refresh.timer
+  rm -f /etc/systemd/system/netfilter-persistent.service.d/fwguard-ipset.conf
+  rmdir /etc/systemd/system/netfilter-persistent.service.d >/dev/null 2>&1 || true
+  rm -f /etc/iptables/ipsets /etc/iptables/ipsets.rules
+  iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+  ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  echo "✅ 已卸载 Cloudflare SSH 白名单和中国 ICMP 屏蔽配置"
+}
+
+uninstall_menu() {
+  local choice confirm
+
+  echo
+  echo "====== 卸载脚本配置菜单 ======"
+  echo "说明：只删除本项目创建的配置、服务、辅助脚本和防火墙规则，不卸载依赖软件包。"
+  echo "1) 卸载 CAKE 配置"
+  echo "3) 卸载 Fail2Ban 本项目配置"
+  echo "6) 卸载 PMTU MSS 规则"
+  echo "7) 卸载 Cloudflare SSH 白名单 + 中国 ICMP 屏蔽"
+  echo "9) 卸载全部可卸载配置"
+  echo "0) 返回"
+  read -rp "请选择要卸载的项目: " choice
+
+  case "$choice" in
+    1) uninstall_cake ;;
+    3) uninstall_fail2ban_config ;;
+    6) uninstall_pmtu_mss ;;
+    7) uninstall_cloudflare_ssh ;;
+    9)
+      read -rp "确认卸载全部可卸载配置？这不会卸载依赖软件包。(y=确认 / n=取消) [默认: n]: " confirm
+      case "${confirm:-n}" in
+        [Yy])
+          uninstall_cake
+          uninstall_fail2ban_config
+          uninstall_pmtu_mss
+          uninstall_cloudflare_ssh
+          ;;
+        *)
+          echo "已取消。"
+          ;;
+      esac
+      ;;
+    0) ;;
+    *) echo "[WARN] 无效选择" ;;
+  esac
+}
+
 rollback_menu() {
   echo
   echo "====== 撤销修改菜单 ======"
@@ -203,7 +363,7 @@ run_script_without_backup() {
   echo ">>> $script 执行完成"
 }
 
-VERSION="1.0.27"
+VERSION="1.0.28"
 
 while true; do
   echo
@@ -220,9 +380,10 @@ while true; do
   echo "8) 检查当前 SSH 白名单 IP 段归属"
   echo "9) 全部执行"
   echo "10) 撤销修改（从最近备份恢复）"
+  echo "11) 卸载脚本配置（保留依赖软件包）"
   echo "0) 退出"
   echo
-  read -rp "请选择要执行的操作 [0-10]: " choice
+  read -rp "请选择要执行的操作 [0-11]: " choice
 
   case "$choice" in
     1)
@@ -258,6 +419,9 @@ while true; do
       ;;
     10)
       rollback_menu
+      ;;
+    11)
+      uninstall_menu
       ;;
     0)
       echo "退出"

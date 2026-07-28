@@ -15,6 +15,7 @@ VPS 安全与网络优化一键工具。`vps-secure.sh` 是主入口脚本，提
 | 8 | `ssh-whitelist-check.sh` | 检查当前生效的 SSH 白名单链和 ipset 集合，显示 Cloudflare ASN、中国全量或中国省份等 IP 段归属；发现 nft 后端时可选择切换到 iptables-legacy。 |
 | 9 | 全部配置脚本 | 按顺序执行配置类功能。 |
 | 10 | 主脚本内置 | 从最近备份撤销已支持的修改。 |
+| 11 | 主脚本内置 | 卸载本项目创建的配置、服务、辅助脚本和防火墙规则，但保留已安装依赖软件包。 |
 
 ## 一键运行
 
@@ -33,6 +34,7 @@ bash <(curl -sL https://gh-proxy.com/https://raw.githubusercontent.com/avsba001/
 - 请使用 `root` 用户运行。
 - 主脚本会先检查远程 `VERSION`，发现新版本时自动更新后再继续执行。
 - 大部分修改会在 `/var/backups/vps-secure` 下保存最近备份，可通过菜单中的“撤销修改”恢复。
+- “卸载脚本配置”用于删除本项目创建的配置和规则，不删除 `fail2ban`、`ufw`、`ipset`、`iptables-persistent` 等依赖软件包。
 - `xanmod.sh` 安装内核后需要重启系统才能加载新内核，主脚本不提供自动回滚。
 - `cloudflare-ssh.sh` 自带回滚保护。应用后请按脚本提示确认 SSH 和网络正常，再执行确认命令保留规则。
 - 中国 IP ICMP 屏蔽已合并到 `cloudflare-ssh.sh`，不再提供独立 `cn-ipset.sh`。
