@@ -720,6 +720,52 @@ ensure_jump() {
   run "$table_cmd" -I INPUT "$position" -p "$proto" "$@" -j "$chain"
 }
 
+ensure_ssh_guard_jump() {
+  local table_cmd="$1"
+  local chain="$2"
+  local port="$3"
+  local position=1
+
+  if [[ "$ALLOW_ESTABLISHED" == "1" ]]; then
+    ensure_established_rule "$table_cmd"
+    position=2
+  fi
+  ensure_jump "$table_cmd" "$chain" tcp "$position" --dport "$port"
+}
+
+warn_early_ssh_accepts() {
+  local table_cmd="$1"
+  local chain="$2"
+  local port="$3"
+  local before_guard=1
+  local line target
+
+  echo "检查 tcp/$port 是否存在早于 $chain 的 ACCEPT："
+  while IFS= read -r line; do
+    case "$line" in
+      *"-j $chain"*)
+        before_guard=0
+        ;;
+      *"--dport $port"*"-j ACCEPT"*)
+        if [[ "$before_guard" == "1" ]]; then
+          echo "  [WARN] INPUT 中发现白名单前的同端口 ACCEPT：$line"
+        fi
+        ;;
+      *"-j "*)
+        if [[ "$before_guard" == "1" ]]; then
+          target="$(sed -n 's/.*-j \([^ ]*\).*/\1/p' <<< "$line")"
+          if [[ -n "$target" ]] && "$table_cmd" -S "$target" >/dev/null 2>&1; then
+            if "$table_cmd" -S "$target" 2>/dev/null | grep -F -- "--dport $port" | grep -F -- "-j ACCEPT" >/dev/null 2>&1; then
+              echo "  [WARN] $target 链在白名单前放行 tcp/$port："
+              "$table_cmd" -S "$target" 2>/dev/null | grep -F -- "--dport $port" | grep -F -- "-j ACCEPT" | sed 's/^/    /'
+            fi
+          fi
+        fi
+        ;;
+    esac
+  done < <("$table_cmd" -S INPUT 2>/dev/null || true)
+}
+
 remove_input_jumps_to_chain() {
   local table_cmd="$1"
   local chain="$2"
@@ -757,9 +803,9 @@ apply_ipv4_rules() {
   run iptables -A "$CHAIN_ICMP_V4" -m set --match-set "$IPSET_CN4" src -j DROP
   run iptables -A "$CHAIN_ICMP_V4" -j RETURN
 
-  [[ "$ALLOW_ESTABLISHED" == "1" ]] && ensure_established_rule iptables
-  ensure_jump iptables "$CHAIN_V4" tcp 2 --dport "$SSH_PORT"
-  ensure_jump iptables "$CHAIN_ICMP_V4" icmp 2
+  ensure_ssh_guard_jump iptables "$CHAIN_V4" "$SSH_PORT"
+  ensure_jump iptables "$CHAIN_ICMP_V4" icmp 3
+  warn_early_ssh_accepts iptables "$CHAIN_V4" "$SSH_PORT"
 }
 
 apply_ipv6_rules() {
@@ -796,9 +842,9 @@ apply_ipv6_rules() {
   run ip6tables -A "$CHAIN_ICMP_V6" -m set --match-set "$IPSET_CN6" src -j DROP
   run ip6tables -A "$CHAIN_ICMP_V6" -j RETURN
 
-  [[ "$ALLOW_ESTABLISHED" == "1" ]] && ensure_established_rule ip6tables
-  ensure_jump ip6tables "$CHAIN_V6" tcp 2 --dport "$SSH_PORT"
-  ensure_jump ip6tables "$CHAIN_ICMP_V6" ipv6-icmp 2
+  ensure_ssh_guard_jump ip6tables "$CHAIN_V6" "$SSH_PORT"
+  ensure_jump ip6tables "$CHAIN_ICMP_V6" ipv6-icmp 3
+  warn_early_ssh_accepts ip6tables "$CHAIN_V6" "$SSH_PORT"
 }
 
 remove_legacy_country_whitelists() {
@@ -1109,6 +1155,10 @@ diagnose_rules() {
   echo "== 当前 iptables 挂接规则 =="
   iptables -S INPUT 2>/dev/null | grep -E "$CHAIN_V4|$CHAIN_ICMP_V4|ESTABLISHED" || true
   ip6tables -S INPUT 2>/dev/null | grep -E "$CHAIN_V6|$CHAIN_ICMP_V6|ESTABLISHED" || true
+  warn_early_ssh_accepts iptables "$CHAIN_V4" "${SSH_PORT:-22}"
+  if [[ "$ENABLE_IPV6" == "1" ]]; then
+    warn_early_ssh_accepts ip6tables "$CHAIN_V6" "${SSH_PORT:-22}"
+  fi
   echo
   echo "== 当前 SSH 白名单链 =="
   iptables -S "$CHAIN_V4" 2>/dev/null || echo "IPv4 SSH 白名单链缺失"
