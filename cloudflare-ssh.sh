@@ -733,6 +733,50 @@ ensure_ssh_guard_jump() {
   ensure_jump "$table_cmd" "$chain" tcp "$position" --dport "$port"
 }
 
+ensure_1panel_ssh_guard_hooks() {
+  local table_cmd="$1"
+  local chain="$2"
+  local port="$3"
+  local panel_chain line has_ssh_accept accept_position rule_number
+
+  # 1Panel may place its own INPUT chains before the top-level jump. Hook
+  # those chains as well so their SSH ACCEPT rules cannot bypass the guard.
+  while IFS= read -r panel_chain; do
+    [[ -n "$panel_chain" ]] || continue
+    has_ssh_accept=0
+    while IFS= read -r line; do
+      if [[ "$line" == *"--dport $port"*"-j ACCEPT"* ]]; then
+        has_ssh_accept=1
+        break
+      fi
+    done < <("$table_cmd" -S "$panel_chain" 2>/dev/null || true)
+    [[ "$has_ssh_accept" == "1" ]] || continue
+
+    # Remove stale hooks first, then calculate the current position of the
+    # first SSH ACCEPT so loopback and established-state rules remain ahead.
+    while "$table_cmd" -C "$panel_chain" -p tcp --dport "$port" -j "$chain" >/dev/null 2>&1; do
+      run "$table_cmd" -D "$panel_chain" -p tcp --dport "$port" -j "$chain"
+      [[ "$DRY_RUN" == "1" ]] && break
+    done
+
+    accept_position=0
+    rule_number=0
+    while IFS= read -r line; do
+      [[ "$line" == -A\ * ]] || continue
+      rule_number=$((rule_number + 1))
+      if [[ "$line" == *"--dport $port"*"-j ACCEPT"* ]]; then
+        accept_position="$rule_number"
+        break
+      fi
+    done < <("$table_cmd" -S "$panel_chain" 2>/dev/null || true)
+    [[ "$accept_position" -gt 0 ]] || continue
+    run "$table_cmd" -I "$panel_chain" "$accept_position" -p tcp --dport "$port" -j "$chain"
+    echo "已在 1Panel 链 $panel_chain 的 SSH 放行规则前挂接 $chain"
+  done < <("$table_cmd" -S 2>/dev/null \
+    | sed -n 's/^-N \(1PANEL_[^ ]*\)$/\1/p' \
+    | sort -u)
+}
+
 warn_early_ssh_accepts() {
   local table_cmd="$1"
   local chain="$2"
@@ -804,6 +848,7 @@ apply_ipv4_rules() {
   run iptables -A "$CHAIN_ICMP_V4" -j RETURN
 
   ensure_ssh_guard_jump iptables "$CHAIN_V4" "$SSH_PORT"
+  ensure_1panel_ssh_guard_hooks iptables "$CHAIN_V4" "$SSH_PORT"
   ensure_jump iptables "$CHAIN_ICMP_V4" icmp 3
   warn_early_ssh_accepts iptables "$CHAIN_V4" "$SSH_PORT"
 }
@@ -843,6 +888,7 @@ apply_ipv6_rules() {
   run ip6tables -A "$CHAIN_ICMP_V6" -j RETURN
 
   ensure_ssh_guard_jump ip6tables "$CHAIN_V6" "$SSH_PORT"
+  ensure_1panel_ssh_guard_hooks ip6tables "$CHAIN_V6" "$SSH_PORT"
   ensure_jump ip6tables "$CHAIN_ICMP_V6" ipv6-icmp 3
   warn_early_ssh_accepts ip6tables "$CHAIN_V6" "$SSH_PORT"
 }
